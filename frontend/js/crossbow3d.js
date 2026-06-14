@@ -17,6 +17,19 @@ class Crossbow3D {
         this.showGrid = true;
         this.wireframe = false;
 
+        this.leftArmSkinned = null;
+        this.rightArmSkinned = null;
+        this.leftArmBones = [];
+        this.rightArmBones = [];
+        this.leftSkeletonHelper = null;
+        this.rightSkeletonHelper = null;
+        this.leftBowTip = null;
+        this.rightBowTip = null;
+
+        this.armBoneCount = 6;
+        this.currentDrawAmount = 0;
+        this.targetDrawAmount = 0;
+
         this.init();
     }
 
@@ -149,6 +162,146 @@ class Crossbow3D {
         return group;
     }
 
+    createSkinnedBowArm(armLength, radius, scale, isLeft) {
+        const boneCount = this.armBoneCount;
+        const segmentLength = armLength / boneCount;
+
+        const geometry = new THREE.CylinderGeometry(
+            radius, radius * 0.85,
+            armLength,
+            12, boneCount,
+            false
+        );
+
+        const position = geometry.attributes.position;
+        const skinIndices = [];
+        const skinWeights = [];
+
+        for (let i = 0; i < position.count; i++) {
+            const y = position.getY(i);
+            const normalizedY = (y + armLength / 2) / armLength;
+            const boneIndex = Math.min(boneCount - 1, Math.floor(normalizedY * boneCount));
+
+            let blend = 0;
+            if (boneIndex < boneCount - 1) {
+                const localY = (normalizedY * boneCount) - boneIndex;
+                blend = localY;
+            }
+
+            const idx0 = boneIndex;
+            const idx1 = Math.min(boneCount - 1, boneIndex + 1);
+            const w0 = 1 - blend;
+            const w1 = blend;
+
+            skinIndices.push(idx0, idx1, 0, 0);
+            skinWeights.push(w0, w1, 0, 0);
+        }
+
+        geometry.setAttribute('skinIndex', new THREE.Uint16BufferAttribute(skinIndices, 4));
+        geometry.setAttribute('skinWeight', new THREE.Float32BufferAttribute(skinWeights, 4));
+
+        const material = new THREE.MeshStandardMaterial({
+            color: 0xc4a882,
+            roughness: 0.5,
+            metalness: 0.2,
+            skinning: true
+        });
+
+        const bones = [];
+        let prevBone = new THREE.Bone();
+        prevBone.position.y = -armLength / 2;
+        bones.push(prevBone);
+
+        for (let i = 1; i < boneCount; i++) {
+            const bone = new THREE.Bone();
+            bone.position.y = segmentLength;
+            prevBone.add(bone);
+            bones.push(bone);
+            prevBone = bone;
+        }
+
+        const skeleton = new THREE.Skeleton(bones);
+        const skinnedMesh = new THREE.SkinnedMesh(geometry, material);
+        skinnedMesh.castShadow = true;
+        skinnedMesh.receiveShadow = true;
+        skinnedMesh.add(bones[0]);
+        skinnedMesh.bind(skeleton);
+
+        const tipBone = bones[bones.length - 1];
+        const tip = new THREE.Mesh(
+            new THREE.SphereGeometry(0.04 * scale, 12, 12),
+            new THREE.MeshStandardMaterial({
+                color: 0x8899aa,
+                roughness: 0.35,
+                metalness: 0.85
+            })
+        );
+        tip.castShadow = true;
+        tipBone.add(tip);
+
+        return {
+            skinnedMesh,
+            bones,
+            skeleton,
+            tip,
+            tipBone
+        };
+    }
+
+    getBowArmBendingAngles(drawAmount, maxDraw, boneCount, armLength) {
+        const angles = [];
+        const normalizedDraw = Math.min(Math.max(drawAmount / maxDraw, 0), 1);
+        const maxAngle = Math.PI / 4;
+
+        const cumulativeAngle = normalizedDraw * maxAngle;
+
+        for (let i = 0; i < boneCount; i++) {
+            const bonePos = i / (boneCount - 1);
+            const angleFactor = Math.sin(Math.PI * 0.5 * bonePos);
+            const boneAngle = cumulativeAngle * angleFactor * 0.5;
+            angles.push(boneAngle);
+        }
+
+        return angles;
+    }
+
+    updateArmBones(bones, isLeft, drawAmount, maxDraw) {
+        const angles = this.getBowArmBendingAngles(drawAmount, maxDraw, bones.length, 1.0);
+
+        for (let i = 0; i < bones.length; i++) {
+            const targetAngle = isLeft ? -angles[i] : angles[i];
+
+            const currentAngle = bones[i].rotation.z;
+            const newAngle = currentAngle + (targetAngle - currentAngle) * 0.3;
+
+            bones[i].rotation.z = newAngle;
+
+            if (i > 0) {
+                bones[i].position.y = bones[i - 1].position.y + (1.0 / bones.length);
+            }
+        }
+    }
+
+    getBowTipPosition(bones, isLeft, armLength, drawAmount) {
+        const angle = this.getBowArmBendingAngles(drawAmount, armLength * 0.6, 10, armLength);
+        let totalAngle = angle.reduce((a, b) => a + b, 0) * (isLeft ? -1 : 1);
+        totalAngle *= 0.8;
+
+        const basePos = new THREE.Vector3(
+            isLeft ? -armLength / 2 : armLength / 2,
+            0,
+            0
+        );
+
+        const tipOffset = new THREE.Vector3(
+            isLeft ? -armLength / 2 : armLength / 2,
+            Math.sin(Math.abs(totalAngle)) * armLength * 0.25,
+            0
+        );
+
+        return tipOffset;
+    }
+
     createCrossbow(crossbowData = null) {
         if (this.crossbowGroup) {
             this.scene.remove(this.crossbowGroup);
@@ -159,6 +312,10 @@ class Crossbow3D {
         const scale = crossbowData ? Math.min(crossbowData.bow_length / 1.4, 1.2) : 1.0;
         const bowLength = crossbowData ? crossbowData.bow_length : 1.4;
         const stringLength = crossbowData ? crossbowData.string_length : 1.45;
+
+        this.bowLength = bowLength;
+        this.bowScale = scale;
+        this.maxDraw = bowLength * 0.6 * scale;
 
         this.crossbowGroup = new THREE.Group();
 
@@ -178,12 +335,6 @@ class Crossbow3D {
             color: 0x8899aa,
             roughness: 0.35,
             metalness: 0.85
-        });
-
-        const hornMat = new THREE.MeshStandardMaterial({
-            color: 0xc4a882,
-            roughness: 0.5,
-            metalness: 0.2
         });
 
         const stockLen = 1.2 * scale;
@@ -207,44 +358,28 @@ class Crossbow3D {
         triggerGuard.rotation.x = Math.PI;
         this.crossbowGroup.add(triggerGuard);
 
-        const bowArmLen = bowLength / 2;
-        const bowArmCurve = new THREE.CatmullRomCurve3([
-            new THREE.Vector3(0, 0, 0),
-            new THREE.Vector3(bowArmLen * 0.5, bowArmLen * 0.2, 0),
-            new THREE.Vector3(bowArmLen * 0.8, bowArmLen * 0.35, 0),
-            new THREE.Vector3(bowArmLen, bowArmLen * 0.25, 0)
-        ]);
+        const bowArmLen = bowLength / 2 * scale;
+        const bowArmRadius = 0.035 * scale;
 
-        const bowArmGeo = new THREE.TubeGeometry(bowArmCurve, 32, 0.035 * scale, 8, false);
-        const bowArmMat = hornMat;
+        const leftArmResult = this.createSkinnedBowArm(bowArmLen, bowArmRadius, scale, true);
+        leftArmResult.skinnedMesh.position.z = -stockLen / 2 + 0.05;
+        leftArmResult.skinnedMesh.rotation.z = -Math.PI / 12;
+        this.crossbowGroup.add(leftArmResult.skinnedMesh);
 
-        const leftArm = new THREE.Mesh(bowArmGeo, bowArmMat);
-        leftArm.castShadow = true;
-        leftArm.rotation.y = Math.PI;
-        leftArm.position.z = -stockLen / 2 + 0.05;
-        this.crossbowGroup.add(leftArm);
+        const rightArmResult = this.createSkinnedBowArm(bowArmLen, bowArmRadius, scale, false);
+        rightArmResult.skinnedMesh.position.z = -stockLen / 2 + 0.05;
+        rightArmResult.skinnedMesh.rotation.z = Math.PI / 12;
+        this.crossbowGroup.add(rightArmResult.skinnedMesh);
 
-        const rightArm = new THREE.Mesh(bowArmGeo, bowArmMat);
-        rightArm.castShadow = true;
-        rightArm.position.z = -stockLen / 2 + 0.05;
-        this.crossbowGroup.add(rightArm);
+        this.leftArmSkinned = leftArmResult.skinnedMesh;
+        this.rightArmSkinned = rightArmResult.skinnedMesh;
+        this.leftArmBones = leftArmResult.bones;
+        this.rightArmBones = rightArmResult.bones;
+        this.leftBowTip = leftArmResult.tip;
+        this.rightBowTip = rightArmResult.tip;
 
-        const bowTipL = new THREE.Mesh(
-            new THREE.SphereGeometry(0.04 * scale, 12, 12),
-            metalMat
-        );
-        bowTipL.position.set(-bowArmLen, bowArmLen * 0.25 * scale, -stockLen / 2 + 0.05);
-        this.crossbowGroup.add(bowTipL);
-
-        const bowTipR = new THREE.Mesh(
-            new THREE.SphereGeometry(0.04 * scale, 12, 12),
-            metalMat
-        );
-        bowTipR.position.set(bowArmLen, bowArmLen * 0.25 * scale, -stockLen / 2 + 0.05);
-        this.crossbowGroup.add(bowTipR);
-
-        this.stringAnchorL = bowTipL.position.clone();
-        this.stringAnchorR = bowTipR.position.clone();
+        this.stringAnchorL = new THREE.Vector3(-bowArmLen * 0.95, bowArmLen * 0.15, -stockLen / 2 + 0.05);
+        this.stringAnchorR = new THREE.Vector3(bowArmLen * 0.95, bowArmLen * 0.15, -stockLen / 2 + 0.05);
 
         const stringMat = new THREE.LineBasicMaterial({
             color: 0xd4c4a8,
@@ -289,7 +424,39 @@ class Crossbow3D {
         this.crossbowGroup.rotation.y = Math.PI / 6;
         this.scene.add(this.crossbowGroup);
 
+        this.currentDrawAmount = 0;
+        this.targetDrawAmount = 0;
+        this.updateArmDeformation(0);
         this.setStringPosition(0, 0, this.stringRestZ);
+    }
+
+    updateArmDeformation(drawAmount) {
+        this.targetDrawAmount = drawAmount;
+
+        const smoothDraw = this.currentDrawAmount + (this.targetDrawAmount - this.currentDrawAmount) * 0.15;
+        this.currentDrawAmount = smoothDraw;
+
+        this.updateArmBones(this.leftArmBones, true, smoothDraw, this.maxDraw);
+        this.updateArmBones(this.rightArmBones, false, smoothDraw, this.maxDraw);
+
+        this.updateStringAnchors();
+    }
+
+    updateStringAnchors() {
+        const worldPosL = new THREE.Vector3();
+        const worldPosR = new THREE.Vector3();
+
+        if (this.leftBowTip) {
+            this.leftBowTip.getWorldPosition(worldPosL);
+            const localL = this.crossbowGroup.worldToLocal(worldPosL.clone());
+            this.stringAnchorL.copy(localL);
+        }
+
+        if (this.rightBowTip) {
+            this.rightBowTip.getWorldPosition(worldPosR);
+            const localR = this.crossbowGroup.worldToLocal(worldPosR.clone());
+            this.stringAnchorR.copy(localR);
+        }
     }
 
     createArrow(scale) {
@@ -348,6 +515,9 @@ class Crossbow3D {
 
     setStringPosition(x, y, z) {
         const centerPoint = new THREE.Vector3(x, y, z);
+
+        const drawAmount = (z - this.stringRestZ) / (this.stringDrawnZ - this.stringRestZ) * this.maxDraw;
+        this.updateArmDeformation(Math.max(0, drawAmount));
 
         const posL = this.stringLeft.geometry.attributes.position;
         posL.setXYZ(0, this.stringAnchorL.x, this.stringAnchorL.y, this.stringAnchorL.z);
@@ -583,6 +753,9 @@ class Crossbow3D {
             this.arrow.position.x = 0;
             this.arrow.position.y = 0;
         }
+        this.currentDrawAmount = 0;
+        this.targetDrawAmount = 0;
+        this.updateArmDeformation(0);
     }
 
     setShowTrajectory(show) {
@@ -596,6 +769,15 @@ class Crossbow3D {
         this.showGrid = show;
         if (this.gridHelper) {
             this.gridHelper.visible = show;
+        }
+    }
+
+    setShowSkeleton(show) {
+        if (this.leftSkeletonHelper) {
+            this.leftSkeletonHelper.visible = show;
+        }
+        if (this.rightSkeletonHelper) {
+            this.rightSkeletonHelper.visible = show;
         }
     }
 
