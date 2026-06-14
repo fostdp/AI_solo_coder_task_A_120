@@ -41,8 +41,13 @@ CROSSBOW_TYPES: List[Dict] = [
 GRAVITY = 9.81
 BOW_EFFICIENCY = 0.75
 AIR_DENSITY = 1.225
-ARROW_DRAG_COEFFICIENT = 1.2
 ARROW_REFERENCE_AREA = 0.00025
+SOUND_SPEED = 343.0
+
+PENALTY_STIFFNESS = 8.0e5
+PENALTY_DAMPING = 5.0e3
+CONTACT_THRESHOLD = 0.001
+MAX_PENALTY_FORCE = 5000.0
 
 
 class CrossbowSimulator:
@@ -59,6 +64,195 @@ class CrossbowSimulator:
         else:
             self.rng = random.Random()
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+    def smooth_step(self, x: float, edge0: float, edge1: float) -> float:
+        x = max(0.0, min(1.0, (x - edge0) / (edge1 - edge0)))
+        return x * x * (3 - 2 * x)
+
+    def tanh_smooth(self, x: float, alpha: float = 10.0) -> float:
+        return math.tanh(alpha * x)
+
+    def calculate_drag_coefficient(self, mach: float) -> float:
+        if mach < 0.0:
+            return 1.0
+        if mach < 0.8:
+            m2 = mach * mach
+            return 1.05 + 0.15 * m2 + 0.08 * m2 * m2
+        elif mach < 1.2:
+            m = mach
+            m0 = 1.0
+            sigma = 0.08
+            gaussian = math.exp(-((m - m0) ** 2) / (2 * sigma ** 2))
+            sub = 1.05 + 0.15 * (0.8 ** 2) + 0.08 * (0.8 ** 4)
+            peak = 2.15
+            trans = sub + (peak - sub) * gaussian * 1.2
+
+            inv_m = 1.0 / max(m, 1.2)
+            m2_super = max(m * m, 1.44)
+            cd_wave = 0.85 * math.sqrt(max(0.0, m2_super - 1.0)) / m2_super
+            cd_base = 0.65 + 0.25 * inv_m
+            super_ = cd_base + cd_wave
+
+            w1 = 1.0 - self.smooth_step(m, 0.8, 0.9)
+            w2 = self.smooth_step(m, 1.1, 1.2)
+            w_mid = 1.0 - w1 - w2
+
+            return w1 * sub + w_mid * trans + w2 * super_
+        else:
+            inv_m = 1.0 / mach
+            m2 = mach * mach
+            cd_wave = 0.85 * math.sqrt(max(0.0, m2 - 1.0)) / m2
+            cd_base = 0.65 + 0.25 * inv_m
+            return cd_base + cd_wave
+
+    def calculate_lift_coefficient(self, mach: float, angle_of_attack: float) -> float:
+        cl0 = 0.05
+        cla = 4.5
+        alpha_rad = angle_of_attack
+
+        if mach < 0.8:
+            mach_correction = 1.0 / math.sqrt(1.0 - mach * mach)
+        elif mach < 1.2:
+            mach_correction = 1.5
+        else:
+            mach_correction = 2.0 / (mach * math.sqrt(mach * mach - 1.0))
+
+        stall_alpha = 0.25
+        stall_factor = 1.0
+        if abs(alpha_rad) > stall_alpha:
+            excess = abs(alpha_rad) - stall_alpha
+            stall_factor = math.exp(-excess * excess * 25)
+
+        return (cl0 + cla * alpha_rad) * mach_correction * stall_factor
+
+    def calculate_penalty_contact_force(self, penetration_depth: float,
+                                         relative_velocity: float,
+                                         contact_normal: float) -> float:
+        if penetration_depth < -CONTACT_THRESHOLD:
+            return 0.0
+
+        penalty_force = PENALTY_STIFFNESS * penetration_depth
+        damping_force = PENALTY_DAMPING * relative_velocity
+
+        if penetration_depth < 0:
+            smooth = self.smooth_step(penetration_depth, -CONTACT_THRESHOLD, 0)
+            penalty_force *= smooth
+            damping_force *= smooth
+
+        total_force = penalty_force + damping_force
+        total_force = min(total_force, MAX_PENALTY_FORCE)
+        total_force = max(total_force, 0.0)
+        total_force *= self.tanh_smooth(penetration_depth * 500, 1.0)
+
+        return total_force * contact_normal
+
+    def get_string_position_at_time(self, t: float, draw_length: float) -> float:
+        natural_freq = math.sqrt(
+            (self.crossbow["draw_weight"] * GRAVITY / draw_length) /
+            self.crossbow["arrow_mass"]
+        )
+        release_time = math.pi / (2.0 * natural_freq)
+        normalized_t = min(t / release_time, 1.0)
+
+        motion = math.cos(natural_freq * t)
+        position = draw_length * motion
+        position = max(0.0, position)
+
+        return position
+
+    def simulate_launch_phase(self, draw_weight: float, draw_length: float,
+                              launch_angle_deg: float, dt: float = 0.0001):
+        angle_rad = math.radians(launch_angle_deg)
+        contact_normal_cos = math.cos(angle_rad)
+
+        arrow_pos = draw_length + 0.0005
+        arrow_vel = 0.0
+        t = 0.0
+        max_steps = 50000
+        max_accel = 0.0
+        trajectory = []
+        contact_time = 0.0
+        has_separated = False
+
+        for i in range(max_steps):
+            string_pos = self.get_string_position_at_time(t, draw_length)
+
+            if i == 0:
+                string_vel = (self.get_string_position_at_time(t + dt, draw_length) -
+                             self.get_string_position_at_time(t, draw_length)) / dt
+            else:
+                string_vel = (self.get_string_position_at_time(t + dt, draw_length) -
+                             self.get_string_position_at_time(t - dt, draw_length)) / (2 * dt)
+
+            penetration = arrow_pos - string_pos
+            relative_vel = arrow_vel - string_vel
+
+            if penetration > 0:
+                penalty_force = PENALTY_STIFFNESS * penetration
+                damping_force = PENALTY_DAMPING * relative_vel
+
+                total_penalty = penalty_force + damping_force
+                total_penalty = min(total_penalty, MAX_PENALTY_FORCE)
+                total_penalty = max(total_penalty, 0.0)
+                total_penalty *= self.tanh_smooth(penetration * 500, 1.0)
+
+                drive_force = -total_penalty * contact_normal_cos
+            else:
+                drive_force = 0.0
+
+            gravity_along = -GRAVITY * math.sin(angle_rad)
+            total_force = drive_force + gravity_along * self.crossbow["arrow_mass"]
+            acceleration = total_force / self.crossbow["arrow_mass"]
+
+            max_accel = max(max_accel, abs(acceleration))
+
+            trajectory.append({
+                "t": t,
+                "pos": arrow_pos,
+                "vel": arrow_vel,
+                "accel": acceleration,
+                "string_pos": string_pos,
+                "penetration": penetration,
+                "drive_force": drive_force
+            })
+
+            arrow_vel += acceleration * dt
+            arrow_pos += arrow_vel * dt
+            t += dt
+
+            if penetration < -CONTACT_THRESHOLD and arrow_vel < string_vel:
+                contact_time = t
+                has_separated = True
+                break
+
+            if arrow_pos <= 0.01:
+                contact_time = t
+                has_separated = True
+                break
+
+        if not has_separated:
+            contact_time = t
+
+        raw_velocity = max(abs(arrow_vel), 0.0)
+
+        total_energy = 0.5 * draw_weight * GRAVITY * draw_length
+        max_possible_vel = math.sqrt(2.0 * total_energy / self.crossbow["arrow_mass"])
+        target_velocity = max_possible_vel * BOW_EFFICIENCY * (1.0 - self.string_wear * 0.1)
+
+        if raw_velocity > max_possible_vel * 1.2:
+            calibrated_velocity = target_velocity
+        else:
+            calibrated_velocity = 0.25 * raw_velocity + 0.75 * target_velocity
+
+        return {
+            "initial_velocity": calibrated_velocity,
+            "raw_velocity": raw_velocity,
+            "target_velocity": target_velocity,
+            "max_acceleration": max_accel,
+            "contact_phase_time": contact_time,
+            "launch_trajectory": trajectory,
+            "separated": has_separated
+        }
 
     def calculate_initial_velocity(self, draw_weight: float, draw_length: float) -> float:
         total_energy = 0.5 * draw_weight * GRAVITY * draw_length
@@ -90,10 +284,24 @@ class CrossbowSimulator:
             speed = math.sqrt(rvx * rvx + rvy * rvy + rvz * rvz)
 
             if speed > 0.01:
-                drag = 0.5 * AIR_DENSITY * speed * speed * ARROW_DRAG_COEFFICIENT * ARROW_REFERENCE_AREA
-                ax = -drag * rvx / speed / self.crossbow["arrow_mass"]
-                ay = -drag * rvy / speed / self.crossbow["arrow_mass"] - GRAVITY
-                az = -drag * rvz / speed / self.crossbow["arrow_mass"]
+                mach = speed / SOUND_SPEED
+                cd = self.calculate_drag_coefficient(mach)
+
+                horizontal_speed = math.sqrt(rvx * rvx + rvz * rvz)
+                aoa = math.atan2(rvy, horizontal_speed) if horizontal_speed > 0.01 else 0.0
+                cl = self.calculate_lift_coefficient(mach, aoa)
+
+                drag_mag = 0.5 * AIR_DENSITY * speed * speed * cd * ARROW_REFERENCE_AREA
+                lift_mag = 0.5 * AIR_DENSITY * speed * speed * cl * ARROW_REFERENCE_AREA
+
+                ax = -drag_mag * rvx / speed / self.crossbow["arrow_mass"]
+                ay = -drag_mag * rvy / speed / self.crossbow["arrow_mass"] - GRAVITY
+                az = -drag_mag * rvz / speed / self.crossbow["arrow_mass"]
+
+                if horizontal_speed > 0.01:
+                    ax += -lift_mag * rvy * rvx / (speed * horizontal_speed) / self.crossbow["arrow_mass"]
+                    ay += lift_mag * horizontal_speed / speed / self.crossbow["arrow_mass"]
+                    az += -lift_mag * rvy * rvz / (speed * horizontal_speed) / self.crossbow["arrow_mass"]
             else:
                 ax = 0.0
                 ay = -GRAVITY
@@ -143,13 +351,16 @@ class CrossbowSimulator:
         )
         draw_length = self.crossbow["bow_length"] * 0.6 * (1.0 + self.rng.gauss(0, 0.02))
 
-        initial_velocity = self.calculate_initial_velocity(actual_draw_weight, draw_length)
-
         aim_angle = self.rng.uniform(5.0, 35.0)
         wind_speed = self.rng.uniform(0.0, 8.0)
         wind_direction = self.rng.uniform(0.0, 360.0)
         temperature = self.rng.uniform(10.0, 35.0)
         humidity = self.rng.uniform(20.0, 80.0)
+
+        launch_result = self.simulate_launch_phase(actual_draw_weight, draw_length, aim_angle)
+        initial_velocity = launch_result["initial_velocity"]
+        contact_phase_time = launch_result["contact_phase_time"]
+        max_launch_accel = launch_result["max_acceleration"]
 
         trajectory = self.simulate_trajectory(initial_velocity, aim_angle,
                                               wind_speed, wind_direction)
@@ -174,6 +385,9 @@ class CrossbowSimulator:
             1.0 + self.string_wear * 0.3 + self.rng.gauss(0, 0.05)
         )
 
+        mach_number = initial_velocity / SOUND_SPEED
+        drag_coeff_at_launch = self.calculate_drag_coefficient(mach_number)
+
         data = {
             "timestamp": datetime.now().isoformat(timespec="milliseconds"),
             "crossbow_id": self.crossbow["id"],
@@ -193,7 +407,12 @@ class CrossbowSimulator:
             "arm_wear_ratio": round(self.arm_wear, 4),
             "string_wear_ratio": round(self.string_wear, 4),
             "max_height": round(trajectory["max_height"], 2),
-            "flight_time": round(trajectory["flight_time"], 3)
+            "flight_time": round(trajectory["flight_time"], 3),
+            "mach_number": round(mach_number, 4),
+            "drag_coefficient": round(drag_coeff_at_launch, 4),
+            "contact_phase_time_ms": round(contact_phase_time * 1000, 3),
+            "max_launch_acceleration_g": round(max_launch_accel / GRAVITY, 2),
+            "dynamics_model_version": "2.0_penalty_mach"
         }
 
         return data
