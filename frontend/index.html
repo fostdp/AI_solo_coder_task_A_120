@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>古代弩机弹射动力学仿真与精准度分析系统</title>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/examples/js/controls/OrbitControls.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+    <header class="top-bar">
+        <div class="logo">
+            <span class="logo-icon">🏹</span>
+            <h1>古代弩机弹射动力学仿真与精准度分析系统</h1>
+        </div>
+        <div class="status-bar">
+            <div id="connection-status" class="status connected">
+                <span class="dot"></span>
+                <span>后端已连接</span>
+            </div>
+            <div id="system-time" class="time"></div>
+        </div>
+    </header>
+
+    <main class="main-container">
+        <aside class="left-panel">
+            <div class="panel-section">
+                <h3>弩机选择</h3>
+                <select id="crossbow-select" class="select-input">
+                    <option value="">加载中...</option>
+                </select>
+                <div id="crossbow-info" class="crossbow-info">
+                    <div class="info-row"><span>朝代:</span><span id="info-dynasty">-</span></div>
+                    <div class="info-row"><span>拉力:</span><span id="info-draw-weight">-</span></div>
+                    <div class="info-row"><span>弩臂长:</span><span id="info-bow-length">-</span></div>
+                    <div class="info-row"><span>弦长:</span><span id="info-string-length">-</span></div>
+                    <div class="info-row"><span>箭重:</span><span id="info-arrow-mass">-</span></div>
+                    <div class="info-row"><span>有效射程:</span><span id="info-effective-range">-</span></div>
+                    <div class="info-row"><span>最大射程:</span><span id="info-max-range">-</span></div>
+                </div>
+            </div>
+
+            <div class="panel-section">
+                <h3>发射参数</h3>
+                <div class="slider-group">
+                    <label>发射角度: <span id="angle-value">15.0</span>°</label>
+                    <input type="range" id="angle-slider" min="0" max="60" step="0.5" value="15">
+                </div>
+                <div class="slider-group">
+                    <label>风速: <span id="wind-value">0.0</span> m/s</label>
+                    <input type="range" id="wind-slider" min="0" max="20" step="0.5" value="0">
+                </div>
+                <div class="slider-group">
+                    <label>风向: <span id="wind-dir-value">0</span>°</label>
+                    <input type="range" id="wind-dir-slider" min="0" max="360" step="5" value="0">
+                </div>
+                <button id="btn-simulate" class="btn btn-primary">模拟发射</button>
+                <button id="btn-animate" class="btn btn-secondary">播放弓弦动画</button>
+            </div>
+
+            <div class="panel-section">
+                <h3>实时数据</h3>
+                <div class="realtime-grid">
+                    <div class="metric-card">
+                        <div class="metric-label">初速</div>
+                        <div class="metric-value" id="rt-velocity">0.0</div>
+                        <div class="metric-unit">m/s</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="metric-label">射程</div>
+                        <div class="metric-value" id="rt-range">0.0</div>
+                        <div class="metric-unit">m</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="metric-label">最高点</div>
+                        <div class="metric-value" id="rt-maxh">0.0</div>
+                        <div class="metric-unit">m</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="metric-label">飞行时间</div>
+                        <div class="metric-value" id="rt-time">0.0</div>
+                        <div class="metric-unit">s</div>
+                    </div>
+                    <div class="metric-card warning">
+                        <div class="metric-label">弓弦张力</div>
+                        <div class="metric-value" id="rt-tension">0.0</div>
+                        <div class="metric-unit">N</div>
+                    </div>
+                    <div class="metric-card danger">
+                        <div class="metric-label">弩臂形变</div>
+                        <div class="metric-value" id="rt-deform">0.0</div>
+                        <div class="metric-unit">m</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="panel-section">
+                <h3>告警</h3>
+                <div id="alerts-container" class="alerts-container">
+                    <div class="alert-empty">暂无告警</div>
+                </div>
+            </div>
+        </aside>
+
+        <section class="center-panel">
+            <div class="tabs">
+                <button class="tab-btn active" data-tab="3d-view">三维视图</button>
+                <button class="tab-btn" data-tab="trajectory">弹道分析</button>
+                <button class="tab-btn" data-tab="accuracy">精度分析</button>
+            </div>
+
+            <div class="tab-content active" id="tab-3d-view">
+                <div id="three-container" class="three-container"></div>
+                <div class="view-controls">
+                    <label>
+                        <input type="checkbox" id="show-trajectory" checked>
+                        显示弹道
+                    </label>
+                    <label>
+                        <input type="checkbox" id="show-grid" checked>
+                        显示网格
+                    </label>
+                    <label>
+                        <input type="checkbox" id="show-wireframe">
+                        线框模式
+                    </label>
+                    <button id="btn-reset-view" class="btn btn-small">重置视角</button>
+                </div>
+            </div>
+
+            <div class="tab-content" id="tab-trajectory">
+                <div class="chart-container">
+                    <canvas id="trajectory-chart"></canvas>
+                </div>
+                <div class="chart-container small">
+                    <canvas id="velocity-chart"></canvas>
+                </div>
+                <div class="chart-container small">
+                    <canvas id="altitude-chart"></canvas>
+                </div>
+            </div>
+
+            <div class="tab-content" id="tab-accuracy">
+                <div class="accuracy-header">
+                    <h3>射击精度分析</h3>
+                    <button id="btn-run-analysis" class="btn btn-primary">运行精度分析</button>
+                </div>
+                <div class="accuracy-stats">
+                    <div class="stat-card">
+                        <div class="stat-label">总发射次数</div>
+                        <div class="stat-value" id="acc-shots">0</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">圆概率误差 (CEP)</div>
+                        <div class="stat-value" id="acc-cep">0.00</div>
+                        <div class="stat-unit">m</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">X方向标准差</div>
+                        <div class="stat-value" id="acc-stdx">0.00</div>
+                        <div class="stat-unit">m</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">Y方向标准差</div>
+                        <div class="stat-value" id="acc-stdy">0.00</div>
+                        <div class="stat-unit">m</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">平均初速</div>
+                        <div class="stat-value" id="acc-vel">0.0</div>
+                        <div class="stat-unit">m/s</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">平均射程</div>
+                        <div class="stat-value" id="acc-range">0</div>
+                        <div class="stat-unit">m</div>
+                    </div>
+                </div>
+                <div class="chart-container">
+                    <canvas id="spread-chart"></canvas>
+                </div>
+                <div class="chart-container small">
+                    <canvas id="sight-adjust-chart"></canvas>
+                </div>
+                <div class="sight-scale-section">
+                    <h4>望山刻度优化建议</h4>
+                    <div id="sight-scale-recommendation" class="sight-recommendation">
+                        请先运行精度分析
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <aside class="right-panel">
+            <div class="panel-section">
+                <h3>历史数据</h3>
+                <div id="shot-history" class="shot-history">
+                    <div class="history-empty">暂无历史记录</div>
+                </div>
+            </div>
+            <div class="panel-section">
+                <h3>传感器监控</h3>
+                <div class="chart-container tiny">
+                    <canvas id="tension-chart"></canvas>
+                </div>
+                <div class="chart-container tiny">
+                    <canvas id="deform-chart"></canvas>
+                </div>
+            </div>
+        </aside>
+    </main>
+
+    <script src="js/crossbow3d.js"></script>
+    <script src="js/accuracy.js"></script>
+    <script src="js/app.js"></script>
+</body>
+</html>
