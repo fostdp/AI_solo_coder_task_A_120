@@ -1,4 +1,6 @@
 #include "alarm_mqtt_service.h"
+#include "logger.h"
+#include "metrics.h"
 #include <iostream>
 #include <sstream>
 
@@ -22,7 +24,7 @@ bool AlarmMqttService::start() {
     if (running_) return true;
     running_ = true;
     worker_thread_ = std::thread(&AlarmMqttService::worker_loop, this);
-    std::cout << "[Alarm] MQTT service started" << std::endl;
+    LOG_INFO("[Alarm] MQTT service started");
     return true;
 }
 
@@ -34,8 +36,7 @@ void AlarmMqttService::stop() {
     if (worker_thread_.joinable()) {
         worker_thread_.join();
     }
-    std::cout << "[Alarm] Service stopped. Received=" << received_count_
-              << ", alerts=" << alert_count_ << std::endl;
+    LOG_INFO("[Alarm] Service stopped. Received={}, alerts={}", received_count_, alert_count_);
 }
 
 bool AlarmMqttService::is_running() const {
@@ -103,6 +104,7 @@ bool AlarmMqttService::check_and_alert(const SensorData& data) {
         }
 
         alert_count_++;
+        METRICS_ALERT_FIRED();
         alerted = true;
     };
 
@@ -149,7 +151,8 @@ bool AlarmMqttService::publish_alert_mqtt(const Alert& alert) {
     std::string topic = config_.mqtt.topic_prefix + "/" + std::to_string(alert.crossbow_id);
     std::string payload = j.dump();
 
-    std::cout << "[Alarm][MQTT] Publish to " << topic << ": " << payload << std::endl;
+    LOG_INFO("[Alarm][MQTT] Publish to {}: {}", topic, payload);
+    METRICS_MQTT_PUBLISHED();
     return true;
 }
 
@@ -163,9 +166,9 @@ void AlarmMqttService::worker_loop() {
             check_and_alert(data);
             received_count_++;
         } catch (const std::exception& e) {
-            std::cerr << "[Alarm] Worker error: " << e.what() << std::endl;
+            LOG_ERROR("[Alarm] Worker error: {}", e.what());
         } catch (...) {
-            std::cerr << "[Alarm] Unknown worker error" << std::endl;
+            LOG_ERROR("[Alarm] Unknown worker error");
         }
     }
 }
