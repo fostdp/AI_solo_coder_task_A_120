@@ -1,15 +1,13 @@
 #pragma once
 
 #include "common.h"
+#include "message_queue.h"
 #include <string>
-#include <functional>
 #include <memory>
 
 class UdpReceiver {
 public:
-    using DataCallback = std::function<void(const SensorData&)>;
-
-    UdpReceiver(int port, DataCallback callback);
+    UdpReceiver(int port, std::shared_ptr<SensorQueue> queue);
     ~UdpReceiver();
 
     bool start();
