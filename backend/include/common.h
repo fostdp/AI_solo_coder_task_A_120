@@ -1,13 +1,16 @@
 #pragma once
 
+#define _USE_MATH_DEFINES
+#include <cmath>
 #include <string>
 #include <vector>
 #include <chrono>
 #include <cstdint>
-#include <uuid/uuid.h>
 #include <cstring>
 #include <sstream>
 #include <iomanip>
+#include <random>
+#include <algorithm>
 
 struct SensorData {
     std::chrono::system_clock::time_point timestamp;
@@ -95,11 +98,18 @@ struct AccuracyAnalysis {
 };
 
 static std::string generate_uuid() {
-    uuid_t uuid;
-    uuid_generate(uuid);
-    char str[37];
-    uuid_unparse(uuid, str);
-    return std::string(str);
+    static std::mt19937 rng(std::random_device{}());
+    static std::uniform_int_distribution<uint64_t> dist(0, UINT64_MAX);
+    uint64_t part1 = dist(rng);
+    uint64_t part2 = dist(rng);
+    std::ostringstream oss;
+    oss << std::hex << std::setfill('0');
+    oss << std::setw(8) << (part1 >> 32) << "-";
+    oss << std::setw(4) << ((part1 >> 16) & 0xFFFF) << "-";
+    oss << std::setw(4) << ((part1 & 0x0FFF) | 0x4000) << "-";
+    oss << std::setw(4) << (((part2 >> 48) & 0x3FFF) | 0x8000) << "-";
+    oss << std::setw(12) << (part2 & 0xFFFFFFFFFFFF);
+    return oss.str();
 }
 
 static std::string format_timestamp(const std::chrono::system_clock::time_point& tp) {
