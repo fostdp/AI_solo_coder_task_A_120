@@ -1,4 +1,6 @@
 #include "mqtt_alert_manager.h"
+#include "logger.h"
+#include "metrics.h"
 #include <iostream>
 #include <sstream>
 #include <nlohmann/json.hpp>
@@ -26,15 +28,14 @@ MqttAlertManager::~MqttAlertManager() {
 }
 
 bool MqttAlertManager::connect() {
-    std::cout << "[MQTT] Connecting to broker " << impl_->broker_host << ":" << impl_->broker_port
-              << " as " << impl_->client_id << std::endl;
+    LOG_INFO("[MQTT] Connecting to broker {}:{} as {}", impl_->broker_host, impl_->broker_port, impl_->client_id);
     impl_->connected = true;
     return true;
 }
 
 void MqttAlertManager::disconnect() {
     impl_->connected = false;
-    std::cout << "[MQTT] Disconnected" << std::endl;
+    LOG_INFO("[MQTT] Disconnected");
 }
 
 bool MqttAlertManager::is_connected() const {
@@ -55,7 +56,8 @@ bool MqttAlertManager::send_alert(const Alert& alert) {
     std::string topic = impl_->topic_prefix + "/" + std::to_string(alert.crossbow_id);
     std::string payload = j.dump();
 
-    std::cout << "[MQTT] Publish to " << topic << ": " << payload << std::endl;
+    LOG_INFO("[MQTT] Publish to {}: {}", topic, payload);
+    METRICS_MQTT_PUBLISHED();
 
     if (impl_->callback) {
         impl_->callback(alert);
@@ -80,6 +82,7 @@ bool MqttAlertManager::check_and_alert(const SensorData& data, const CrossbowTyp
         alert.threshold_value = deformation_threshold;
         alert.actual_value = data.bow_arm_deformation;
         send_alert(alert);
+        METRICS_ALERT_FIRED();
         alerted = true;
     }
 
@@ -96,6 +99,7 @@ bool MqttAlertManager::check_and_alert(const SensorData& data, const CrossbowTyp
         alert.threshold_value = tension_threshold;
         alert.actual_value = data.bow_string_tension;
         send_alert(alert);
+        METRICS_ALERT_FIRED();
         alerted = true;
     }
 
@@ -110,6 +114,7 @@ bool MqttAlertManager::check_and_alert(const SensorData& data, const CrossbowTyp
         alert.threshold_value = 60.0;
         alert.actual_value = data.temperature;
         send_alert(alert);
+        METRICS_ALERT_FIRED();
         alerted = true;
     }
 
