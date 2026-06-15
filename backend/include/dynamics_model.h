@@ -74,8 +74,8 @@ private:
     Vec3 calculate_lift_force(const Vec3& velocity, double air_density);
     Vec3 calculate_gravitational_force(double mass);
 
-    double smooth_step(double x, double edge0, double edge1);
-    double tanh_smooth(double x, double alpha = 10.0);
+    static double smooth_step(double x, double edge0, double edge1);
+    static double tanh_smooth(double x, double alpha = 10.0);
 
     static double subsonic_drag_coeff(double mach);
     static double transonic_drag_coeff(double mach);
