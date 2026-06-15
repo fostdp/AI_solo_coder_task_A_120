@@ -23,12 +23,11 @@ using json = nlohmann::json;
 struct HttpServer::Impl {
     int port;
     std::shared_ptr<ClickHouseStorage> storage;
-    std::shared_ptr<MqttAlertManager> alert_manager;
+    std::shared_ptr<BallisticSimulator> ballistic;
+    std::shared_ptr<AccuracyAnalyzerService> accuracy;
+    std::shared_ptr<AlarmMqttService> alarm;
     std::atomic<bool> running;
     std::thread server_thread;
-    std::mutex data_mutex;
-    std::vector<SensorData> recent_sensor_data;
-    std::map<uint32_t, std::vector<SensorData>> sensor_data_by_crossbow;
 #ifdef _WIN32
     SOCKET server_fd;
     WSADATA wsa_data;
@@ -36,43 +35,23 @@ struct HttpServer::Impl {
     int server_fd;
 #endif
 
-    Impl(int p, std::shared_ptr<ClickHouseStorage> s, std::shared_ptr<MqttAlertManager> a)
-        : port(p), storage(s), alert_manager(a), running(false), server_fd(-1) {}
-
-    void add_sensor_data(const SensorData& data) {
-        std::lock_guard<std::mutex> lock(data_mutex);
-        recent_sensor_data.push_back(data);
-        if (recent_sensor_data.size() > 10000) {
-            recent_sensor_data.erase(recent_sensor_data.begin());
-        }
-        sensor_data_by_crossbow[data.crossbow_id].push_back(data);
-        if (sensor_data_by_crossbow[data.crossbow_id].size() > 2000) {
-            sensor_data_by_crossbow[data.crossbow_id].erase(
-                sensor_data_by_crossbow[data.crossbow_id].begin());
-        }
-    }
-
-    std::vector<SensorData> get_crossbow_data(uint32_t crossbow_id) {
-        std::lock_guard<std::mutex> lock(data_mutex);
-        auto it = sensor_data_by_crossbow.find(crossbow_id);
-        if (it != sensor_data_by_crossbow.end()) {
-            return it->second;
-        }
-        return {};
-    }
+    Impl(int p, std::shared_ptr<ClickHouseStorage> s,
+         std::shared_ptr<BallisticSimulator> b,
+         std::shared_ptr<AccuracyAnalyzerService> a,
+         std::shared_ptr<AlarmMqttService> al)
+        : port(p), storage(s), ballistic(b), accuracy(a), alarm(al),
+          running(false), server_fd(-1) {}
 };
 
 HttpServer::HttpServer(int port,
                        std::shared_ptr<ClickHouseStorage> storage,
-                       std::shared_ptr<MqttAlertManager> alert_manager)
-    : impl_(std::make_unique<Impl>(port, storage, alert_manager)) {}
+                       std::shared_ptr<BallisticSimulator> ballistic,
+                       std::shared_ptr<AccuracyAnalyzerService> accuracy,
+                       std::shared_ptr<AlarmMqttService> alarm)
+    : impl_(std::make_unique<Impl>(port, storage, ballistic, accuracy, alarm)) {}
 
 HttpServer::~HttpServer() {
     stop();
-}
-
-void HttpServer::add_sensor_data(const SensorData& data) {
-    impl_->add_sensor_data(data);
 }
 
 std::string HttpServer::handle_get_crossbow_types(const std::map<std::string, std::string>& params) {
@@ -97,14 +76,12 @@ std::string HttpServer::handle_get_crossbow_types(const std::map<std::string, st
 std::string HttpServer::handle_get_sensor_data(const std::map<std::string, std::string>& params) {
     json j = json::array();
     auto it = params.find("crossbow_id");
-    if (it != params.end()) {
+    if (it != params.end() && impl_->accuracy) {
         uint32_t id = std::stoul(it->second);
-        auto data = impl_->get_crossbow_data(id);
         auto limit_it = params.find("limit");
         size_t limit = limit_it != params.end() ? std::stoul(limit_it->second) : 100;
-        size_t start = data.size() > limit ? data.size() - limit : 0;
-        for (size_t i = start; i < data.size(); i++) {
-            const auto& d = data[i];
+        auto data = impl_->accuracy->get_crossbow_data(id, limit);
+        for (const auto& d : data) {
             j.push_back({
                 {"timestamp", format_timestamp(d.timestamp)},
                 {"crossbow_id", d.crossbow_id},
@@ -129,14 +106,12 @@ std::string HttpServer::handle_get_sensor_data(const std::map<std::string, std::
 std::string HttpServer::handle_get_shot_history(const std::map<std::string, std::string>& params) {
     json j = json::array();
     auto it = params.find("crossbow_id");
-    if (it != params.end()) {
+    if (it != params.end() && impl_->accuracy) {
         uint32_t id = std::stoul(it->second);
-        auto data = impl_->get_crossbow_data(id);
         auto limit_it = params.find("limit");
         size_t limit = limit_it != params.end() ? std::stoul(limit_it->second) : 50;
-        size_t start = data.size() > limit ? data.size() - limit : 0;
-        for (size_t i = start; i < data.size(); i++) {
-            const auto& d = data[i];
+        auto data = impl_->accuracy->get_crossbow_data(id, limit);
+        for (const auto& d : data) {
             j.push_back({
                 {"timestamp", format_timestamp(d.timestamp)},
                 {"crossbow_id", d.crossbow_id},
@@ -152,8 +127,14 @@ std::string HttpServer::handle_get_shot_history(const std::map<std::string, std:
 }
 
 std::string HttpServer::handle_get_alerts(const std::map<std::string, std::string>& params) {
-    auto alerts = impl_->storage->get_active_alerts();
     json j = json::array();
+    if (!impl_->alarm) return j.dump();
+
+    uint32_t crossbow_id = 0;
+    auto it = params.find("crossbow_id");
+    if (it != params.end()) crossbow_id = std::stoul(it->second);
+
+    auto alerts = impl_->alarm->get_active_alerts(crossbow_id);
     for (const auto& a : alerts) {
         j.push_back({
             {"timestamp", format_timestamp(a.timestamp)},
@@ -171,15 +152,9 @@ std::string HttpServer::handle_get_alerts(const std::map<std::string, std::strin
 
 std::string HttpServer::handle_get_accuracy(const std::map<std::string, std::string>& params) {
     auto it = params.find("crossbow_id");
-    if (it != params.end()) {
+    if (it != params.end() && impl_->accuracy) {
         uint32_t id = std::stoul(it->second);
-        auto data = impl_->get_crossbow_data(id);
-
-        std::string crossbow_name;
-        if (!data.empty()) crossbow_name = data[0].crossbow_name;
-
-        AccuracyAnalyzer analyzer;
-        auto analysis = analyzer.analyze(id, crossbow_name, data);
+        auto analysis = impl_->accuracy->get_latest_analysis(id);
 
         json adjustments = json::array();
         for (const auto& adj : analysis.sight_adjustments) {
@@ -211,42 +186,24 @@ std::string HttpServer::handle_get_accuracy(const std::map<std::string, std::str
 
 std::string HttpServer::handle_simulate_shot(const std::map<std::string, std::string>& params) {
     auto it = params.find("crossbow_id");
-    if (it == params.end()) return "{\"error\":\"missing crossbow_id\"}";
+    if (it == params.end() || !impl_->ballistic) return "{\"error\":\"missing crossbow_id\"}";
 
     uint32_t id = std::stoul(it->second);
-    auto types = impl_->storage->get_crossbow_types();
-    CrossbowType crossbow;
-    bool found = false;
-    for (const auto& t : types) {
-        if (t.id == id) {
-            crossbow = t;
-            found = true;
-            break;
-        }
-    }
-    if (!found) return "{\"error\":\"crossbow not found\"}";
-
     double angle = 15.0;
     double wind_speed = 0.0;
     double wind_direction = 0.0;
 
     auto angle_it = params.find("angle");
     if (angle_it != params.end()) angle = std::stod(angle_it->second);
-
     auto wind_it = params.find("wind_speed");
     if (wind_it != params.end()) wind_speed = std::stod(wind_it->second);
-
     auto wd_it = params.find("wind_direction");
     if (wd_it != params.end()) wind_direction = std::stod(wd_it->second);
 
-    DynamicsModel model(crossbow);
-    double initial_velocity = model.calculate_initial_velocity(
-        crossbow.draw_weight, crossbow.bow_length * 0.6, crossbow.arrow_mass);
-
-    auto trajectory = model.simulate_trajectory(initial_velocity, angle, wind_speed, wind_direction);
-    auto record = model.calculate_shot_results(trajectory);
+    auto result = impl_->ballistic->simulate_shot(id, angle, wind_speed, wind_direction);
 
     json traj = json::array();
+    const auto& trajectory = result.full_trajectory;
     size_t step = std::max((size_t)1, trajectory.size() / 200);
     for (size_t i = 0; i < trajectory.size(); i += step) {
         const auto& p = trajectory[i];
@@ -274,42 +231,90 @@ std::string HttpServer::handle_simulate_shot(const std::map<std::string, std::st
     }
 
     json j = {
-        {"shot_id", record.shot_id},
-        {"initial_velocity", record.initial_velocity},
-        {"launch_angle", record.launch_angle},
-        {"max_height", record.max_height},
-        {"flight_time", record.flight_time},
+        {"shot_id", result.shot_record.shot_id},
+        {"initial_velocity", result.shot_record.initial_velocity},
+        {"launch_angle", result.shot_record.launch_angle},
+        {"max_height", result.shot_record.max_height},
+        {"flight_time", result.shot_record.flight_time},
         {"impact_point", {
-            {"x", record.impact_point.x},
-            {"y", record.impact_point.y},
-            {"z", record.impact_point.z}
+            {"x", result.shot_record.impact_point.x},
+            {"y", result.shot_record.impact_point.y},
+            {"z", result.shot_record.impact_point.z}
         }},
-        {"impact_velocity", record.impact_velocity},
-        {"kinetic_energy", record.kinetic_energy},
-        {"trajectory", traj}
+        {"impact_velocity", result.shot_record.impact_velocity},
+        {"kinetic_energy", result.shot_record.kinetic_energy},
+        {"trajectory", traj},
+        {"mach_number", result.mach_number_at_launch},
+        {"drag_coefficient", result.drag_coefficient_at_launch},
+        {"contact_phase_time_ms", result.launch_phase_contact_time_ms},
+        {"max_launch_acceleration_g", result.max_launch_acceleration_g},
+        {"dynamics_version", result.dynamics_version}
     };
     return j.dump();
 }
 
 std::string HttpServer::handle_run_accuracy_analysis(const std::map<std::string, std::string>& params) {
     auto it = params.find("crossbow_id");
-    if (it == params.end()) return "{\"error\":\"missing crossbow_id\"}";
+    if (it == params.end() || !impl_->accuracy) return "{\"error\":\"missing crossbow_id\"}";
 
     uint32_t id = std::stoul(it->second);
-    auto data = impl_->get_crossbow_data(id);
-
-    std::string crossbow_name;
-    if (!data.empty()) crossbow_name = data[0].crossbow_name;
-
-    AccuracyAnalyzer analyzer;
-    auto analysis = analyzer.analyze(id, crossbow_name, data);
-    impl_->storage->insert_accuracy_analysis(analysis);
-
+    auto data = impl_->accuracy->get_crossbow_data(id, 5000);
+    std::string name;
+    if (!data.empty()) name = data[0].crossbow_name;
+    impl_->accuracy->run_analysis_now(id, name);
     return handle_get_accuracy(params);
 }
 
 std::string HttpServer::handle_resolve_alert(const std::map<std::string, std::string>& params) {
     return "{\"status\":\"ok\"}";
+}
+
+std::string HttpServer::handle_get_system_status(const std::map<std::string, std::string>& params) {
+    json j = {
+        {"status", "running"},
+        {"version", "2.0_refactored"},
+        {"architecture", "udp_receiver → message_queue → (ballistic_simulator | accuracy_analyzer | alarm_mqtt)"},
+        {"modules", {
+            {"udp_receiver", impl_->ballistic != nullptr},
+            {"ballistic_simulator", impl_->ballistic != nullptr},
+            {"accuracy_analyzer", impl_->accuracy != nullptr},
+            {"alarm_mqtt", impl_->alarm != nullptr}
+        }}
+    };
+    return j.dump();
+}
+
+std::string HttpServer::handle_get_ballistic_result(const std::map<std::string, std::string>& params) {
+    if (!impl_->ballistic) return "{}";
+    auto it = params.find("crossbow_id");
+    if (it == params.end()) {
+        auto all = impl_->ballistic->get_all_latest_results();
+        json j = json::object();
+        for (auto& kv : all) {
+            j[std::to_string(kv.first)] = {
+                {"initial_velocity", kv.second.shot_record.initial_velocity},
+                {"range", kv.second.source_data.range},
+                {"mach_number", kv.second.mach_number_at_launch},
+                {"drag_coefficient", kv.second.drag_coefficient_at_launch},
+                {"max_launch_acceleration_g", kv.second.max_launch_acceleration_g},
+                {"contact_phase_time_ms", kv.second.launch_phase_contact_time_ms},
+                {"dynamics_version", kv.second.dynamics_version}
+            };
+        }
+        return j.dump();
+    }
+    uint32_t id = std::stoul(it->second);
+    auto result = impl_->ballistic->get_latest_result(id);
+    json j = {
+        {"initial_velocity", result.shot_record.initial_velocity},
+        {"range", result.source_data.range},
+        {"mach_number", result.mach_number_at_launch},
+        {"drag_coefficient", result.drag_coefficient_at_launch},
+        {"max_launch_acceleration_g", result.max_launch_acceleration_g},
+        {"contact_phase_time_ms", result.launch_phase_contact_time_ms},
+        {"dynamics_version", result.dynamics_version}
+    };
+    return j.dump();
 }
 
 static std::map<std::string, std::string> parse_url_params(const std::string& path) {
@@ -398,6 +403,15 @@ bool HttpServer::start() {
         return false;
     }
 
+    struct timeval tv;
+    tv.tv_sec = 1;
+    tv.tv_usec = 0;
+#ifdef _WIN32
+    setsockopt(impl_->server_fd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv));
+#else
+    setsockopt(impl_->server_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+#endif
+
     impl_->running = true;
     impl_->server_thread = std::thread([this]() {
         while (impl_->running) {
@@ -448,8 +462,14 @@ bool HttpServer::start() {
                     body = handle_run_accuracy_analysis(params);
                 } else if (path == "/api/resolve-alert") {
                     body = handle_resolve_alert(params);
+                } else if (path == "/api/system-status") {
+                    body = handle_get_system_status(params);
+                } else if (path == "/api/ballistic-result") {
+                    body = handle_get_ballistic_result(params);
+                } else if (path == "/") {
+                    body = handle_get_system_status(params);
                 } else {
-                    body = "{\"status\":\"running\",\"version\":\"1.0\"}";
+                    body = "{\"status\":\"running\",\"version\":\"2.0\"}";
                 }
                 response = build_response(body);
             } else {
