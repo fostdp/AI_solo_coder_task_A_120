@@ -6,10 +6,16 @@ struct ClickHouseStorage::Impl {
     std::string host;
     int port;
     std::string database;
+    std::string user;
+    std::string password;
     bool connected = false;
+    std::vector<CrossbowType> crossbow_types;
+    std::vector<SensorData> sensor_data;
+    std::vector<Alert> alerts;
 
-    Impl(const std::string& h, int p, const std::string& db)
-        : host(h), port(p), database(db) {}
+    Impl(const std::string& h, int p, const std::string& db,
+         const std::string& u = "default", const std::string& pw = "")
+        : host(h), port(p), database(db), user(u), password(pw) {}
 
     std::string build_connection_string() const {
         std::ostringstream oss;
@@ -18,8 +24,9 @@ struct ClickHouseStorage::Impl {
     }
 };
 
-ClickHouseStorage::ClickHouseStorage(const std::string& host, int port, const std::string& database)
-    : impl_(std::make_unique<Impl>(host, port, database)) {}
+ClickHouseStorage::ClickHouseStorage(const std::string& host, int port, const std::string& database,
+                                     const std::string& user, const std::string& password)
+    : impl_(std::make_unique<Impl>(host, port, database, user, password)) {}
 
 ClickHouseStorage::~ClickHouseStorage() {
     disconnect();
@@ -40,15 +47,26 @@ bool ClickHouseStorage::is_connected() const {
     return impl_->connected;
 }
 
+bool ClickHouseStorage::init_schema() {
+    std::cout << "[ClickHouse] Schema initialized (mock)" << std::endl;
+    return true;
+}
+
+bool ClickHouseStorage::insert_crossbow_type(const CrossbowType& type) {
+    impl_->crossbow_types.push_back(type);
+    std::cout << "[ClickHouse] Insert crossbow type: " << type.name << std::endl;
+    return true;
+}
+
 bool ClickHouseStorage::insert_sensor_data(const SensorData& data) {
-    if (!impl_->connected) {
-        std::cout << "[ClickHouse] Insert sensor data - crossbow: " << data.crossbow_name
-                  << ", velocity: " << data.arrow_velocity
-                  << ", range: " << data.range
-                  << std::endl;
-        return true;
+    if (!impl_->connected) return false;
+    impl_->sensor_data.push_back(data);
+    if (impl_->sensor_data.size() > 50000) {
+        impl_->sensor_data.erase(impl_->sensor_data.begin(), impl_->sensor_data.begin() + 10000);
     }
-    return false;
+    std::cout << "[ClickHouse] Insert sensor - " << data.crossbow_name
+              << " v=" << data.arrow_velocity << " R=" << data.range << std::endl;
+    return true;
 }
 
 bool ClickHouseStorage::insert_sensor_batch(const std::vector<SensorData>& batch) {
@@ -83,13 +101,15 @@ bool ClickHouseStorage::insert_shot_record(const ShotRecord& record) {
 }
 
 bool ClickHouseStorage::insert_alert(const Alert& alert) {
-    if (!impl_->connected) {
-        std::cout << "[ClickHouse] Insert alert - " << alert.alert_type
-                  << ", severity: " << alert.severity
-                  << ": " << alert.message << std::endl;
-        return true;
+    if (!impl_->connected) return false;
+    impl_->alerts.push_back(alert);
+    if (impl_->alerts.size() > 1000) {
+        impl_->alerts.erase(impl_->alerts.begin(), impl_->alerts.begin() + 500);
     }
-    return false;
+    std::cout << "[ClickHouse] Insert alert - " << alert.alert_type
+              << ", severity: " << alert.severity
+              << ": " << alert.message << std::endl;
+    return true;
 }
 
 bool ClickHouseStorage::insert_accuracy_analysis(const AccuracyAnalysis& analysis) {
@@ -104,6 +124,11 @@ bool ClickHouseStorage::insert_accuracy_analysis(const AccuracyAnalysis& analysi
 
 std::vector<SensorData> ClickHouseStorage::get_sensor_history(uint32_t crossbow_id, int hours) {
     std::vector<SensorData> result;
+    for (const auto& d : impl_->sensor_data) {
+        if (d.crossbow_id == crossbow_id || crossbow_id == 0) {
+            result.push_back(d);
+        }
+    }
     return result;
 }
 
@@ -113,12 +138,14 @@ std::vector<ShotRecord> ClickHouseStorage::get_shot_history(uint32_t crossbow_id
 }
 
 std::vector<Alert> ClickHouseStorage::get_active_alerts() {
-    std::vector<Alert> result;
-    return result;
+    return impl_->alerts;
 }
 
 std::vector<CrossbowType> ClickHouseStorage::get_crossbow_types() {
-    std::vector<CrossbowType> types = {
+    if (!impl_->crossbow_types.empty()) {
+        return impl_->crossbow_types;
+    }
+    return {
         {1, "秦弩", "秦朝", 150.0, 1.38, 1.42, 0.065, 150.0, 300.0},
         {2, "汉弩（蹶张）", "汉朝", 180.0, 1.45, 1.48, 0.072, 180.0, 350.0},
         {3, "汉弩（腰引）", "汉朝", 250.0, 1.52, 1.55, 0.085, 220.0, 450.0},
@@ -130,7 +157,6 @@ std::vector<CrossbowType> ClickHouseStorage::get_crossbow_types() {
         {9, "元复合弩", "元朝", 220.0, 1.50, 1.53, 0.080, 210.0, 420.0},
         {10, "明三眼弩", "明朝", 160.0, 1.42, 1.45, 0.068, 160.0, 320.0}
     };
-    return types;
 }
 
 AccuracyAnalysis ClickHouseStorage::get_latest_accuracy(uint32_t crossbow_id) {
