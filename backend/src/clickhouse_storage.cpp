@@ -1,4 +1,5 @@
 #include "clickhouse_storage.h"
+#include "logger.h"
 #include <iostream>
 #include <sstream>
 
@@ -33,14 +34,14 @@ ClickHouseStorage::~ClickHouseStorage() {
 }
 
 bool ClickHouseStorage::connect() {
-    std::cout << "[ClickHouse] Connecting to " << impl_->host << ":" << impl_->port << "/" << impl_->database << std::endl;
+    LOG_INFO("[ClickHouse] Connecting to {}:{}/{}", impl_->host, impl_->port, impl_->database);
     impl_->connected = true;
     return true;
 }
 
 void ClickHouseStorage::disconnect() {
     impl_->connected = false;
-    std::cout << "[ClickHouse] Disconnected" << std::endl;
+    LOG_INFO("[ClickHouse] Disconnected");
 }
 
 bool ClickHouseStorage::is_connected() const {
@@ -48,13 +49,13 @@ bool ClickHouseStorage::is_connected() const {
 }
 
 bool ClickHouseStorage::init_schema() {
-    std::cout << "[ClickHouse] Schema initialized (mock)" << std::endl;
+    LOG_INFO("[ClickHouse] Schema initialized (mock)");
     return true;
 }
 
 bool ClickHouseStorage::insert_crossbow_type(const CrossbowType& type) {
     impl_->crossbow_types.push_back(type);
-    std::cout << "[ClickHouse] Insert crossbow type: " << type.name << std::endl;
+    LOG_INFO("[ClickHouse] Insert crossbow type: {}", type.name);
     return true;
 }
 
@@ -64,8 +65,7 @@ bool ClickHouseStorage::insert_sensor_data(const SensorData& data) {
     if (impl_->sensor_data.size() > 50000) {
         impl_->sensor_data.erase(impl_->sensor_data.begin(), impl_->sensor_data.begin() + 10000);
     }
-    std::cout << "[ClickHouse] Insert sensor - " << data.crossbow_name
-              << " v=" << data.arrow_velocity << " R=" << data.range << std::endl;
+    LOG_INFO("[ClickHouse] Insert sensor - {} v={} R={}", data.crossbow_name, data.arrow_velocity, data.range);
     return true;
 }
 
@@ -80,9 +80,7 @@ bool ClickHouseStorage::insert_sensor_batch(const std::vector<SensorData>& batch
 bool ClickHouseStorage::insert_trajectory_data(uint32_t crossbow_id, const std::string& shot_id,
                                                const std::vector<TrajectoryPoint>& trajectory) {
     if (!impl_->connected) {
-        std::cout << "[ClickHouse] Insert trajectory - crossbow_id: " << crossbow_id
-                  << ", shot_id: " << shot_id
-                  << ", points: " << trajectory.size() << std::endl;
+        LOG_INFO("[ClickHouse] Insert trajectory - crossbow_id: {}, shot_id: {}, points: {}", crossbow_id, shot_id, trajectory.size());
         return true;
     }
     return false;
@@ -92,9 +90,7 @@ bool ClickHouseStorage::insert_shot_record(const ShotRecord& record) {
     if (!impl_->connected) {
         double range = std::sqrt(record.impact_point.x * record.impact_point.x +
                                  record.impact_point.z * record.impact_point.z);
-        std::cout << "[ClickHouse] Insert shot record - velocity: " << record.initial_velocity
-                  << ", range: " << range
-                  << std::endl;
+        LOG_INFO("[ClickHouse] Insert shot record - velocity: {}, range: {}", record.initial_velocity, range);
         return true;
     }
     return false;
@@ -106,17 +102,13 @@ bool ClickHouseStorage::insert_alert(const Alert& alert) {
     if (impl_->alerts.size() > 1000) {
         impl_->alerts.erase(impl_->alerts.begin(), impl_->alerts.begin() + 500);
     }
-    std::cout << "[ClickHouse] Insert alert - " << alert.alert_type
-              << ", severity: " << alert.severity
-              << ": " << alert.message << std::endl;
+    LOG_WARN("[ClickHouse] Insert alert - {}, severity: {}: {}", alert.alert_type, alert.severity, alert.message);
     return true;
 }
 
 bool ClickHouseStorage::insert_accuracy_analysis(const AccuracyAnalysis& analysis) {
     if (!impl_->connected) {
-        std::cout << "[ClickHouse] Insert accuracy analysis - crossbow_id: " << analysis.crossbow_name
-                  << ", CEP: " << analysis.circular_error_probable
-                  << std::endl;
+        LOG_INFO("[ClickHouse] Insert accuracy analysis - crossbow_id: {}, CEP: {}", analysis.crossbow_name, analysis.circular_error_probable);
         return true;
     }
     return false;
