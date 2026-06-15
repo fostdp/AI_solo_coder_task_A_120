@@ -13,6 +13,8 @@
 #include "alarm_mqtt_service.h"
 #include "http_server.h"
 #include "clickhouse_storage.h"
+#include "logger.h"
+#include "metrics.h"
 
 namespace {
     volatile std::sig_atomic_t g_shutdown = 0;
@@ -38,6 +40,8 @@ namespace {
 }
 
 int main(int argc, char* argv[]) {
+    using namespace crossbow;
+
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
 
@@ -46,19 +50,24 @@ int main(int argc, char* argv[]) {
         config_path = argv[1];
     }
 
-    std::cout << "========================================" << std::endl;
-    std::cout << "  弩机弹射动力学仿真系统 v2.0 (重构版)" << std::endl;
-    std::cout << "  架构: 消息队列解耦 + 模块化设计" << std::endl;
-    std::cout << "========================================" << std::endl;
-
     AppConfig config = ConfigManager::load(config_path);
     auto crossbow_types = get_default_crossbow_types();
 
-    std::cout << "[Config] UDP port: " << config.udp_port << std::endl;
-    std::cout << "[Config] HTTP port: " << config.http_port << std::endl;
-    std::cout << "[Config] Queue capacity: " << config.queue_capacity << std::endl;
-    std::cout << "[Config] Ballistic threads: " << config.ballistic_threads << std::endl;
-    std::cout << "[Config] Crossbow types loaded: " << crossbow_types.size() << std::endl;
+    Logger::init(config.log.file, config.log.console,
+                 ConfigManager::parse_log_level(config.log.level));
+
+    LOG_INFO("========================================");
+    LOG_INFO("  弩机弹射动力学仿真系统 v2.0 (重构版)");
+    LOG_INFO("  架构: 消息队列解耦 + 模块化设计");
+    LOG_INFO("========================================");
+
+    LOG_INFO("[Config] UDP port: {}", config.udp_port);
+    LOG_INFO("[Config] HTTP port: {}", config.http_port);
+    LOG_INFO("[Config] Queue capacity: {}", config.queue_capacity);
+    LOG_INFO("[Config] Ballistic threads: {}", config.ballistic_threads);
+    LOG_INFO("[Config] Crossbow types loaded: {}", crossbow_types.size());
+
+    Metrics::instance().init(config.metrics_port, "0.0.0.0");
 
     auto sensor_queue_udp = std::make_shared<SensorQueue>(config.queue_capacity);
     auto sensor_queue_ballistic = std::make_shared<SensorQueue>(config.queue_capacity);
@@ -115,8 +124,8 @@ int main(int argc, char* argv[]) {
     BroadcastingReceiver receiver(config.udp_port, sensor_queue_udp, broadcaster);
 
     auto storage = std::make_shared<ClickHouseStorage>(
-        config.clickhouse_host, config.clickhouse_port,
-        config.clickhouse_db, config.clickhouse_user, config.clickhouse_password
+        config.clickhouse.host, config.clickhouse.port,
+        config.clickhouse.database, config.clickhouse.user, config.clickhouse.password
     );
     storage->connect();
     storage->init_schema();
@@ -143,55 +152,60 @@ int main(int argc, char* argv[]) {
     });
 
     if (!receiver.start()) {
-        std::cerr << "[Main] Failed to start UDP receiver" << std::endl;
+        LOG_ERROR("[Main] Failed to start UDP receiver");
         return 1;
     }
     if (!ballistic->start(config.ballistic_threads)) {
-        std::cerr << "[Main] Failed to start ballistic simulator" << std::endl;
+        LOG_ERROR("[Main] Failed to start ballistic simulator");
         return 1;
     }
     if (!accuracy->start()) {
-        std::cerr << "[Main] Failed to start accuracy analyzer" << std::endl;
+        LOG_ERROR("[Main] Failed to start accuracy analyzer");
         return 1;
     }
     if (!alarm->start()) {
-        std::cerr << "[Main] Failed to start alarm service" << std::endl;
+        LOG_ERROR("[Main] Failed to start alarm service");
         return 1;
     }
     if (!http_server->start()) {
-        std::cerr << "[Main] Failed to start HTTP server" << std::endl;
+        LOG_ERROR("[Main] Failed to start HTTP server");
         return 1;
     }
 
-    std::cout << std::endl;
-    std::cout << "[Main] All modules started successfully" << std::endl;
-    std::cout << "[Main] Architecture flow:" << std::endl;
-    std::cout << "       UDP Sensor Data" << std::endl;
-    std::cout << "              ↓ (MessageQueue)" << std::endl;
-    std::cout << "         ┌────┼────┐" << std::endl;
-    std::cout << "    Ballistic  Accuracy  Alarm(MQTT)" << std::endl;
-    std::cout << "              ↓           ↓" << std::endl;
-    std::cout << "          HTTP API   ClickHouse" << std::endl;
-    std::cout << std::endl;
-    std::cout << "[Main] Press Ctrl+C to stop..." << std::endl;
-    std::cout << std::endl;
+    LOG_INFO("");
+    LOG_INFO("[Main] All modules started successfully");
+    LOG_INFO("[Main] Architecture flow:");
+    LOG_INFO("       UDP Sensor Data");
+    LOG_INFO("              ↓ (MessageQueue)");
+    LOG_INFO("         ┌────┼────┐");
+    LOG_INFO("    Ballistic  Accuracy  Alarm(MQTT)");
+    LOG_INFO("              ↓           ↓");
+    LOG_INFO("          HTTP API   ClickHouse");
+    LOG_INFO("");
+    LOG_INFO("[Main] Press Ctrl+C to stop...");
+    LOG_INFO("");
 
     uint64_t tick_count = 0;
     while (!g_shutdown) {
         std::this_thread::sleep_for(std::chrono::seconds(1));
         tick_count++;
+
+        METRICS_QUEUE_BALLISTIC(sensor_queue_ballistic->size());
+        METRICS_QUEUE_ACCURACY(sensor_queue_accuracy->size());
+        METRICS_QUEUE_ALARM(sensor_queue_alarm->size());
+
         if (tick_count % 60 == 0) {
-            std::cout << "[Main] Heartbeat - UDP queue=" << sensor_queue_udp->size()
-                      << ", Ballistic queue=" << sensor_queue_ballistic->size()
-                      << ", Accuracy queue=" << sensor_queue_accuracy->size()
-                      << ", Alarm queue=" << sensor_queue_alarm->size()
-                      << ", Alert queue=" << alert_queue->size()
-                      << std::endl;
+            LOG_INFO("[Main] Heartbeat - UDP queue={}, Ballistic queue={}, Accuracy queue={}, Alarm queue={}, Alert queue={}",
+                     sensor_queue_udp->size(),
+                     sensor_queue_ballistic->size(),
+                     sensor_queue_accuracy->size(),
+                     sensor_queue_alarm->size(),
+                     alert_queue->size());
         }
     }
 
-    std::cout << std::endl;
-    std::cout << "[Main] Shutdown signal received, stopping all modules..." << std::endl;
+    LOG_INFO("");
+    LOG_INFO("[Main] Shutdown signal received, stopping all modules...");
 
     http_server->stop();
     alarm->stop();
@@ -199,6 +213,6 @@ int main(int argc, char* argv[]) {
     ballistic->stop();
     receiver.stop();
 
-    std::cout << "[Main] All modules stopped. Goodbye!" << std::endl;
+    LOG_INFO("[Main] All modules stopped. Goodbye!");
     return 0;
 }
