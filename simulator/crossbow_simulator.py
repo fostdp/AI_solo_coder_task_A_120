@@ -12,8 +12,9 @@ import random
 import math
 import argparse
 import sys
+import os
 from datetime import datetime
-from typing import Dict, List
+from typing import Dict, List, Optional, Union
 
 CROSSBOW_TYPES: List[Dict] = [
     {"id": 1, "name": "秦弩", "dynasty": "秦朝", "draw_weight": 150.0, "bow_length": 1.38,
@@ -52,18 +53,31 @@ MAX_PENALTY_FORCE = 5000.0
 
 class CrossbowSimulator:
     def __init__(self, crossbow_type: Dict, host: str = "127.0.0.1", port: int = 9000,
-                 seed: int = None):
-        self.crossbow = crossbow_type
+                 seed: int = None, draw_weight: float = None, arrow_mass: float = None,
+                 bow_length: float = None, string_length: float = None,
+                 arm_wear_factor: float = None, string_wear_factor: float = None):
+        self.crossbow = dict(crossbow_type)
         self.host = host
         self.port = port
         self.shot_count = 0
         self.arm_wear = 0.0
         self.string_wear = 0.0
+        self.arm_wear_factor = arm_wear_factor
+        self.string_wear_factor = string_wear_factor
         if seed is not None:
             self.rng = random.Random(seed + crossbow_type["id"])
         else:
             self.rng = random.Random()
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+        if draw_weight is not None:
+            self.crossbow["draw_weight"] = draw_weight
+        if arrow_mass is not None:
+            self.crossbow["arrow_mass"] = arrow_mass
+        if bow_length is not None:
+            self.crossbow["bow_length"] = bow_length
+        if string_length is not None:
+            self.crossbow["string_length"] = string_length
 
     def smooth_step(self, x: float, edge0: float, edge1: float) -> float:
         x = max(0.0, min(1.0, (x - edge0) / (edge1 - edge0)))
@@ -343,8 +357,20 @@ class CrossbowSimulator:
     def generate_shot_data(self) -> Dict:
         self.shot_count += 1
 
-        self.arm_wear = min(1.0, self.arm_wear + self.rng.uniform(0.0001, 0.0005))
-        self.string_wear = min(1.0, self.string_wear + self.rng.uniform(0.0002, 0.0008))
+        arm_wear_min = 0.0001
+        arm_wear_max = 0.0005
+        string_wear_min = 0.0002
+        string_wear_max = 0.0008
+
+        if self.arm_wear_factor is not None:
+            arm_wear_min *= self.arm_wear_factor
+            arm_wear_max *= self.arm_wear_factor
+        if self.string_wear_factor is not None:
+            string_wear_min *= self.string_wear_factor
+            string_wear_max *= self.string_wear_factor
+
+        self.arm_wear = min(1.0, self.arm_wear + self.rng.uniform(arm_wear_min, arm_wear_max))
+        self.string_wear = min(1.0, self.string_wear + self.rng.uniform(string_wear_min, string_wear_max))
 
         actual_draw_weight = self.crossbow["draw_weight"] * (
             1.0 + self.rng.gauss(0, 0.03) - self.arm_wear * 0.15
@@ -426,12 +452,89 @@ class CrossbowSimulator:
             print(f"[{self.crossbow['name']}] Send error: {e}", file=sys.stderr)
             return False
 
+    def set_draw_weight(self, weight_kg: float) -> None:
+        self.crossbow["draw_weight"] = weight_kg
+
+    def set_arrow_mass(self, mass_kg: float) -> None:
+        self.crossbow["arrow_mass"] = mass_kg
+
+    def set_bow_dimensions(self, bow_length: float, string_length: float) -> None:
+        self.crossbow["bow_length"] = bow_length
+        self.crossbow["string_length"] = string_length
+
+    def set_wear_rate(self, arm_wear_factor: float, string_wear_factor: float) -> None:
+        self.arm_wear_factor = arm_wear_factor
+        self.string_wear_factor = string_wear_factor
+
+    def generate_batch(self, count: int, **params) -> List[Dict]:
+        results = []
+        draw_weight_range = params.get("draw_weight_range", None)
+        arrow_mass_range = params.get("arrow_mass_range", None)
+        bow_length_range = params.get("bow_length_range", None)
+        string_length_range = params.get("string_length_range", None)
+
+        original_draw_weight = self.crossbow.get("draw_weight")
+        original_arrow_mass = self.crossbow.get("arrow_mass")
+        original_bow_length = self.crossbow.get("bow_length")
+        original_string_length = self.crossbow.get("string_length")
+
+        try:
+            for i in range(count):
+                if draw_weight_range is not None:
+                    if isinstance(draw_weight_range, (list, tuple)) and len(draw_weight_range) == 2:
+                        self.crossbow["draw_weight"] = self.rng.uniform(
+                            draw_weight_range[0], draw_weight_range[1]
+                        )
+                    elif isinstance(draw_weight_range, (int, float)):
+                        self.crossbow["draw_weight"] = draw_weight_range
+
+                if arrow_mass_range is not None:
+                    if isinstance(arrow_mass_range, (list, tuple)) and len(arrow_mass_range) == 2:
+                        self.crossbow["arrow_mass"] = self.rng.uniform(
+                            arrow_mass_range[0], arrow_mass_range[1]
+                        )
+                    elif isinstance(arrow_mass_range, (int, float)):
+                        self.crossbow["arrow_mass"] = arrow_mass_range
+
+                if bow_length_range is not None:
+                    if isinstance(bow_length_range, (list, tuple)) and len(bow_length_range) == 2:
+                        self.crossbow["bow_length"] = self.rng.uniform(
+                            bow_length_range[0], bow_length_range[1]
+                        )
+                    elif isinstance(bow_length_range, (int, float)):
+                        self.crossbow["bow_length"] = bow_length_range
+
+                if string_length_range is not None:
+                    if isinstance(string_length_range, (list, tuple)) and len(string_length_range) == 2:
+                        self.crossbow["string_length"] = self.rng.uniform(
+                            string_length_range[0], string_length_range[1]
+                        )
+                    elif isinstance(string_length_range, (int, float)):
+                        self.crossbow["string_length"] = string_length_range
+
+                data = self.generate_shot_data()
+                results.append(data)
+        finally:
+            if original_draw_weight is not None:
+                self.crossbow["draw_weight"] = original_draw_weight
+            if original_arrow_mass is not None:
+                self.crossbow["arrow_mass"] = original_arrow_mass
+            if original_bow_length is not None:
+                self.crossbow["bow_length"] = original_bow_length
+            if original_string_length is not None:
+                self.crossbow["string_length"] = original_string_length
+
+        return results
+
     def close(self):
         self.sock.close()
 
 
-def run_single_crossbow(args, crossbow_type):
-    sim = CrossbowSimulator(crossbow_type, args.host, args.port, args.seed)
+def run_single_crossbow(args, crossbow_type, create_simulator=None):
+    if create_simulator is None:
+        sim = CrossbowSimulator(crossbow_type, args.host, args.port, args.seed)
+    else:
+        sim = create_simulator(crossbow_type)
     print(f"[模拟器] {crossbow_type['name']} 启动 - 目标: {args.host}:{args.port}")
 
     shot_count = 0
@@ -455,8 +558,11 @@ def run_single_crossbow(args, crossbow_type):
         sim.close()
 
 
-def run_all_crossbows(args):
-    simulators = [CrossbowSimulator(ct, args.host, args.port, args.seed) for ct in CROSSBOW_TYPES]
+def run_all_crossbows(args, create_simulator=None):
+    if create_simulator is None:
+        simulators = [CrossbowSimulator(ct, args.host, args.port, args.seed) for ct in CROSSBOW_TYPES]
+    else:
+        simulators = [create_simulator(ct) for ct in CROSSBOW_TYPES]
     for s in simulators:
         print(f"[模拟器] {s.crossbow['name']} 启动")
 
@@ -499,27 +605,155 @@ def run_all_crossbows(args):
         print(f"[模拟器] 已停止，累计发射 {total} 发")
 
 
+def load_config_file(config_path: str) -> Dict:
+    if not os.path.exists(config_path):
+        return {}
+
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        if config_path.endswith(".yaml") or config_path.endswith(".yml"):
+            try:
+                import yaml
+                return yaml.safe_load(content) or {}
+            except ImportError:
+                print("[警告] 未安装PyYAML，无法解析YAML配置文件", file=sys.stderr)
+                return {}
+        elif config_path.endswith(".json"):
+            return json.loads(content)
+        else:
+            print(f"[警告] 不支持的配置文件格式: {config_path}", file=sys.stderr)
+            return {}
+    except Exception as e:
+        print(f"[警告] 加载配置文件失败: {e}", file=sys.stderr)
+        return {}
+
+
+def apply_config_to_crossbow(crossbow: Dict, config: Dict) -> Dict:
+    result = dict(crossbow)
+    if "draw_weight" in config:
+        result["draw_weight"] = float(config["draw_weight"])
+    if "arrow_mass" in config:
+        result["arrow_mass"] = float(config["arrow_mass"])
+    if "bow_length" in config:
+        result["bow_length"] = float(config["bow_length"])
+    if "string_length" in config:
+        result["string_length"] = float(config["string_length"])
+    return result
+
+
+def get_env_float(name: str, default: float = None) -> Optional[float]:
+    val = os.environ.get(name)
+    if val is None:
+        return default
+    try:
+        return float(val)
+    except ValueError:
+        return default
+
+
+def get_env_int(name: str, default: int = None) -> Optional[int]:
+    val = os.environ.get(name)
+    if val is None:
+        return default
+    try:
+        return int(val)
+    except ValueError:
+        return default
+
+
 def main():
+    default_host = os.environ.get("SIMULATOR_HOST", "127.0.0.1")
+    default_port = get_env_int("SIMULATOR_PORT", 9000)
+    default_interval = get_env_float("SIMULATOR_INTERVAL", 60.0)
+    default_id = get_env_int("SIMULATOR_ID", None)
+    default_seed = get_env_int("SIMULATOR_SEED", None)
+    default_burst = get_env_int("SIMULATOR_BURST", None)
+    default_burst_interval = get_env_float("SIMULATOR_BURST_INTERVAL", 0.1)
+    default_all = os.environ.get("SIMULATOR_ALL", "").lower() in ("1", "true", "yes")
+
     parser = argparse.ArgumentParser(description="古代弩机传感器数据模拟器")
-    parser.add_argument("--host", default="127.0.0.1", help="UDP接收主机 (默认: 127.0.0.1)")
-    parser.add_argument("--port", type=int, default=9000, help="UDP接收端口 (默认: 9000)")
-    parser.add_argument("--interval", type=float, default=60.0,
+    parser.add_argument("--host", default=default_host, help="UDP接收主机 (默认: 127.0.0.1)")
+    parser.add_argument("--port", type=int, default=default_port, help="UDP接收端口 (默认: 9000)")
+    parser.add_argument("--interval", type=float, default=default_interval,
                         help="发射间隔秒数 (默认: 60秒)")
-    parser.add_argument("--id", type=int, default=None,
+    parser.add_argument("--id", type=int, default=default_id,
                         help="只模拟指定ID的弩机 (1-10)，不指定则全部模拟")
     parser.add_argument("--single-shot", action="store_true",
                         help="只发射一次，然后退出")
-    parser.add_argument("--seed", type=int, default=None,
+    parser.add_argument("--seed", type=int, default=default_seed,
                         help="随机数种子，用于复现实验结果")
-    parser.add_argument("--burst", type=int, default=None,
+    parser.add_argument("--burst", type=int, default=default_burst,
                         help="快速发射模式：连续发射指定次数后退出")
-    parser.add_argument("--burst-interval", type=float, default=0.1,
+    parser.add_argument("--burst-interval", type=float, default=default_burst_interval,
                         help="快速发射模式下的间隔秒数 (默认: 0.1秒)")
+    parser.add_argument("--config", type=str, default=None,
+                        help="配置文件路径 (YAML/JSON)")
 
     args = parser.parse_args()
 
+    config = {}
+    if args.config:
+        config = load_config_file(args.config)
+    else:
+        default_config_paths = ["crossbow_config.yaml", "crossbow_config.yml", "crossbow_config.json"]
+        for path in default_config_paths:
+            if os.path.exists(path):
+                config = load_config_file(path)
+                break
+
+    if config:
+        if "host" in config and args.host == default_host:
+            args.host = config["host"]
+        if "port" in config and args.port == default_port:
+            args.port = int(config["port"])
+        if "interval" in config and args.interval == default_interval:
+            args.interval = float(config["interval"])
+        if "id" in config and args.id == default_id:
+            args.id = int(config["id"])
+        if "seed" in config and args.seed == default_seed:
+            args.seed = int(config["seed"])
+        if "burst" in config and args.burst == default_burst:
+            args.burst = int(config["burst"])
+        if "burst_interval" in config and args.burst_interval == default_burst_interval:
+            args.burst_interval = float(config["burst_interval"])
+
+    custom_draw_weight = get_env_float("SIMULATOR_DRAW_WEIGHT", config.get("draw_weight"))
+    custom_arrow_mass = get_env_float("SIMULATOR_ARROW_MASS", config.get("arrow_mass"))
+    custom_bow_length = get_env_float("SIMULATOR_BOW_LENGTH", config.get("bow_length"))
+    custom_string_length = get_env_float("SIMULATOR_STRING_LENGTH", config.get("string_length"))
+    custom_wear_rate = get_env_float("SIMULATOR_WEAR_RATE", config.get("wear_rate"))
+
+    if custom_wear_rate is not None:
+        custom_arm_wear_factor = custom_wear_rate
+        custom_string_wear_factor = custom_wear_rate
+    else:
+        custom_arm_wear_factor = None
+        custom_string_wear_factor = None
+
+    if default_all:
+        args.id = None
+
     if args.burst:
         args.interval = args.burst_interval
+
+    def create_simulator(crossbow_type):
+        cb = dict(crossbow_type)
+        if custom_draw_weight is not None:
+            cb["draw_weight"] = custom_draw_weight
+        if custom_arrow_mass is not None:
+            cb["arrow_mass"] = custom_arrow_mass
+        if custom_bow_length is not None:
+            cb["bow_length"] = custom_bow_length
+        if custom_string_length is not None:
+            cb["string_length"] = custom_string_length
+        sim = CrossbowSimulator(
+            cb, args.host, args.port, args.seed,
+            arm_wear_factor=custom_arm_wear_factor,
+            string_wear_factor=custom_string_wear_factor
+        )
+        return sim
 
     if args.id:
         crossbow = next((c for c in CROSSBOW_TYPES if c["id"] == args.id), None)
@@ -528,13 +762,13 @@ def main():
             sys.exit(1)
 
         if args.single_shot:
-            sim = CrossbowSimulator(crossbow, args.host, args.port, args.seed)
+            sim = create_simulator(crossbow)
             data = sim.generate_shot_data()
             sim.send_data(data)
             print(json.dumps(data, ensure_ascii=False, indent=2))
             sim.close()
         elif args.burst:
-            sim = CrossbowSimulator(crossbow, args.host, args.port, args.seed)
+            sim = create_simulator(crossbow)
             print(f"[Burst] {crossbow['name']} 发射 {args.burst} 发...")
             for i in range(args.burst):
                 data = sim.generate_shot_data()
@@ -544,13 +778,13 @@ def main():
             print(f"[Burst] 完成，共 {args.burst} 发")
             sim.close()
         else:
-            run_single_crossbow(args, crossbow)
+            run_single_crossbow(args, crossbow, create_simulator)
     else:
         if args.single_shot:
             print("[警告] --single-shot 需要与 --id 配合使用", file=sys.stderr)
         elif args.burst:
             print("[警告] --burst 需要与 --id 配合使用", file=sys.stderr)
-        run_all_crossbows(args)
+        run_all_crossbows(args, create_simulator)
 
 
 if __name__ == "__main__":
