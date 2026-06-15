@@ -1,4 +1,6 @@
 #include "accuracy_analyzer_service.h"
+#include "logger.h"
+#include "metrics.h"
 #include <iostream>
 
 AccuracyAnalyzerService::AccuracyAnalyzerService(
@@ -16,7 +18,7 @@ bool AccuracyAnalyzerService::start() {
     running_ = true;
     worker_thread_ = std::thread(&AccuracyAnalyzerService::worker_loop, this);
     analysis_thread_ = std::thread(&AccuracyAnalyzerService::periodic_analysis_loop, this);
-    std::cout << "[Accuracy] Analyzer service started" << std::endl;
+    LOG_INFO("[Accuracy] Analyzer service started");
     return true;
 }
 
@@ -31,8 +33,7 @@ void AccuracyAnalyzerService::stop() {
     if (analysis_thread_.joinable()) {
         analysis_thread_.join();
     }
-    std::cout << "[Accuracy] Service stopped. Received=" << received_count_
-              << ", analyses=" << analysis_count_ << std::endl;
+    LOG_INFO("[Accuracy] Service stopped. Received={}, analyses={}", received_count_, analysis_count_);
 }
 
 bool AccuracyAnalyzerService::is_running() const {
@@ -57,9 +58,9 @@ void AccuracyAnalyzerService::worker_loop() {
             }
             received_count_++;
         } catch (const std::exception& e) {
-            std::cerr << "[Accuracy] Worker error: " << e.what() << std::endl;
+            LOG_ERROR("[Accuracy] Worker error: {}", e.what());
         } catch (...) {
-            std::cerr << "[Accuracy] Unknown worker error" << std::endl;
+            LOG_ERROR("[Accuracy] Unknown worker error");
         }
     }
 }
@@ -96,10 +97,10 @@ void AccuracyAnalyzerService::periodic_analysis_loop() {
                 }
                 analysis_count_++;
             } catch (const std::exception& e) {
-                std::cerr << "[Accuracy] Analysis error for crossbow " << id
-                          << ": " << e.what() << std::endl;
+                LOG_ERROR("[Accuracy] Analysis error for crossbow {}: {}", id, e.what());
             }
         }
+        METRICS_ACCURACY_DONE();
     }
 }
 
