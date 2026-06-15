@@ -2,12 +2,13 @@
 
 #include "common.h"
 #include "clickhouse_storage.h"
-#include "dynamics_model.h"
-#include "accuracy_analyzer.h"
-#include "mqtt_alert_manager.h"
+#include "ballistic_simulator.h"
+#include "accuracy_analyzer_service.h"
+#include "alarm_mqtt_service.h"
 #include <string>
 #include <memory>
 #include <map>
+#include <vector>
 #include <functional>
 
 class HttpServer {
@@ -16,14 +17,14 @@ public:
 
     HttpServer(int port,
                std::shared_ptr<ClickHouseStorage> storage,
-               std::shared_ptr<MqttAlertManager> alert_manager);
+               std::shared_ptr<BallisticSimulator> ballistic,
+               std::shared_ptr<AccuracyAnalyzerService> accuracy,
+               std::shared_ptr<AlarmMqttService> alarm);
     ~HttpServer();
 
     bool start();
     void stop();
     bool is_running() const;
-
-    void add_sensor_data(const SensorData& data);
 
 private:
     struct Impl;
@@ -38,4 +39,6 @@ private:
     std::string handle_simulate_shot(const std::map<std::string, std::string>& params);
     std::string handle_run_accuracy_analysis(const std::map<std::string, std::string>& params);
     std::string handle_resolve_alert(const std::map<std::string, std::string>& params);
+    std::string handle_get_system_status(const std::map<std::string, std::string>& params);
+    std::string handle_get_ballistic_result(const std::map<std::string, std::string>& params);
 };
