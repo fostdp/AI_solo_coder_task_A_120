@@ -1,0 +1,180 @@
+version: "3.8"
+
+services:
+  # ============================================
+  # ClickHouse - 时序数据存储
+  # ============================================
+  clickhouse:
+    image: clickhouse/clickhouse-server:23.8-alpine
+    container_name: crossbow-clickhouse
+    restart: unless-stopped
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    environment:
+      CLICKHOUSE_DB: crossbow_sim
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: ""
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - ./clickhouse/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8123/ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - crossbow-net
+
+  # ============================================
+  # Mosquitto MQTT Broker - 告警消息总线
+  # ============================================
+  mqtt:
+    image: eclipse-mosquitto:2.0-openssl
+    container_name: crossbow-mqtt
+    restart: unless-stopped
+    ports:
+      - "1883:1883"
+      - "9001:9001"
+    volumes:
+      - mqtt_data:/mosquitto/data
+      - mqtt_log:/mosquitto/log
+      - ./deploy/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mosquitto_sub -t '$$SYS/broker/clients/total' -C 1 -W 3 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    networks:
+      - crossbow-net
+
+  # ============================================
+  # C++ 后端服务 - 数据采集/计算/统计/告警
+  # ============================================
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: crossbow-backend
+    restart: unless-stopped
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      mqtt:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+      - "9000:9000/udp"
+      - "9090:9090"
+    environment:
+      - CONFIG_PATH=/app/config.json
+    volumes:
+      - ./backend/config.json:/app/config.json:ro
+      - backend_logs:/app/logs
+    networks:
+      - crossbow-net
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 512M
+
+  # ============================================
+  # 前端 Nginx - 静态资源 + Gzip + API反向代理
+  # ============================================
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    container_name: crossbow-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "3000:80"
+    networks:
+      - crossbow-net
+
+  # ============================================
+  # Python 模拟器 - 弩机传感器数据生成
+  # ============================================
+  simulator:
+    build:
+      context: .
+      dockerfile: Dockerfile.simulator
+    container_name: crossbow-simulator
+    restart: unless-stopped
+    depends_on:
+      - backend
+    environment:
+      - SIMULATOR_HOST=backend
+      - SIMULATOR_PORT=9000
+      - SIMULATOR_INTERVAL=60
+      - SIMULATOR_ALL=true
+      - SIMULATOR_SEED=42
+    networks:
+      - crossbow-net
+    profiles:
+      - simulator
+
+  # ============================================
+  # Prometheus - 指标采集
+  # ============================================
+  prometheus:
+    image: prom/prometheus:v2.48.0
+    container_name: crossbow-prometheus
+    restart: unless-stopped
+    ports:
+      - "9091:9090"
+    volumes:
+      - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=15d'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+    networks:
+      - crossbow-net
+    profiles:
+      - monitoring
+
+  # ============================================
+  # Grafana - 监控可视化
+  # ============================================
+  grafana:
+    image: grafana/grafana:10.2.0
+    container_name: crossbow-grafana
+    restart: unless-stopped
+    ports:
+      - "3001:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./deploy/grafana/:/etc/grafana/provisioning/:ro
+    networks:
+      - crossbow-net
+    profiles:
+      - monitoring
+
+volumes:
+  clickhouse_data:
+  mqtt_data:
+  mqtt_log:
+  backend_logs:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  crossbow-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
