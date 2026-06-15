@@ -7,12 +7,16 @@
 
 class ClickHouseStorage {
 public:
-    ClickHouseStorage(const std::string& host, int port, const std::string& database);
+    ClickHouseStorage(const std::string& host, int port, const std::string& database,
+                      const std::string& user = "default", const std::string& password = "");
     ~ClickHouseStorage();
 
     bool connect();
     void disconnect();
     bool is_connected() const;
+
+    bool init_schema();
+    bool insert_crossbow_type(const CrossbowType& type);
 
     bool insert_sensor_data(const SensorData& data);
     bool insert_sensor_batch(const std::vector<SensorData>& batch);
