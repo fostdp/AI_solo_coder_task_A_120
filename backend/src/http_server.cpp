@@ -1,4 +1,6 @@
 #include "http_server.h"
+#include "logger.h"
+#include "metrics.h"
 #include <iostream>
 #include <sstream>
 #include <thread>
@@ -55,6 +57,7 @@ HttpServer::~HttpServer() {
 }
 
 std::string HttpServer::handle_get_crossbow_types(const std::map<std::string, std::string>& params) {
+    METRICS_HTTP_REQ("/api/crossbow-types");
     auto types = impl_->storage->get_crossbow_types();
     json j = json::array();
     for (const auto& t : types) {
@@ -74,6 +77,7 @@ std::string HttpServer::handle_get_crossbow_types(const std::map<std::string, st
 }
 
 std::string HttpServer::handle_get_sensor_data(const std::map<std::string, std::string>& params) {
+    METRICS_HTTP_REQ("/api/sensor-data");
     json j = json::array();
     auto it = params.find("crossbow_id");
     if (it != params.end() && impl_->accuracy) {
@@ -104,6 +108,7 @@ std::string HttpServer::handle_get_sensor_data(const std::map<std::string, std::
 }
 
 std::string HttpServer::handle_get_shot_history(const std::map<std::string, std::string>& params) {
+    METRICS_HTTP_REQ("/api/shot-history");
     json j = json::array();
     auto it = params.find("crossbow_id");
     if (it != params.end() && impl_->accuracy) {
@@ -127,6 +132,7 @@ std::string HttpServer::handle_get_shot_history(const std::map<std::string, std:
 }
 
 std::string HttpServer::handle_get_alerts(const std::map<std::string, std::string>& params) {
+    METRICS_HTTP_REQ("/api/alerts");
     json j = json::array();
     if (!impl_->alarm) return j.dump();
 
@@ -151,6 +157,7 @@ std::string HttpServer::handle_get_alerts(const std::map<std::string, std::strin
 }
 
 std::string HttpServer::handle_get_accuracy(const std::map<std::string, std::string>& params) {
+    METRICS_HTTP_REQ("/api/accuracy");
     auto it = params.find("crossbow_id");
     if (it != params.end() && impl_->accuracy) {
         uint32_t id = std::stoul(it->second);
@@ -185,6 +192,7 @@ std::string HttpServer::handle_get_accuracy(const std::map<std::string, std::str
 }
 
 std::string HttpServer::handle_simulate_shot(const std::map<std::string, std::string>& params) {
+    METRICS_HTTP_REQ("/api/simulate-shot");
     auto it = params.find("crossbow_id");
     if (it == params.end() || !impl_->ballistic) return "{\"error\":\"missing crossbow_id\"}";
 
@@ -254,6 +262,7 @@ std::string HttpServer::handle_simulate_shot(const std::map<std::string, std::st
 }
 
 std::string HttpServer::handle_run_accuracy_analysis(const std::map<std::string, std::string>& params) {
+    METRICS_HTTP_REQ("/api/run-analysis");
     auto it = params.find("crossbow_id");
     if (it == params.end() || !impl_->accuracy) return "{\"error\":\"missing crossbow_id\"}";
 
@@ -266,10 +275,12 @@ std::string HttpServer::handle_run_accuracy_analysis(const std::map<std::string,
 }
 
 std::string HttpServer::handle_resolve_alert(const std::map<std::string, std::string>& params) {
+    METRICS_HTTP_REQ("/api/resolve-alert");
     return "{\"status\":\"ok\"}";
 }
 
 std::string HttpServer::handle_get_system_status(const std::map<std::string, std::string>& params) {
+    METRICS_HTTP_REQ("/api/system-status");
     json j = {
         {"status", "running"},
         {"version", "2.0_refactored"},
@@ -285,6 +296,7 @@ std::string HttpServer::handle_get_system_status(const std::map<std::string, std
 }
 
 std::string HttpServer::handle_get_ballistic_result(const std::map<std::string, std::string>& params) {
+    METRICS_HTTP_REQ("/api/ballistic-result");
     if (!impl_->ballistic) return "{}";
     auto it = params.find("crossbow_id");
     if (it == params.end()) {
@@ -369,14 +381,14 @@ void HttpServer::register_routes() {}
 bool HttpServer::start() {
 #ifdef _WIN32
     if (WSAStartup(MAKEWORD(2, 2), &impl_->wsa_data) != 0) {
-        std::cerr << "[HTTP] WSAStartup failed" << std::endl;
+        LOG_ERROR("[HTTP] WSAStartup failed");
         return false;
     }
 #endif
 
     impl_->server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (impl_->server_fd < 0) {
-        std::cerr << "[HTTP] Failed to create socket" << std::endl;
+        LOG_ERROR("[HTTP] Failed to create socket");
         return false;
     }
 
@@ -394,12 +406,12 @@ bool HttpServer::start() {
     server_addr.sin_port = htons(impl_->port);
 
     if (bind(impl_->server_fd, (sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
-        std::cerr << "[HTTP] Failed to bind port " << impl_->port << std::endl;
+        LOG_ERROR("[HTTP] Failed to bind port {}", impl_->port);
         return false;
     }
 
     if (listen(impl_->server_fd, 10) < 0) {
-        std::cerr << "[HTTP] Listen failed" << std::endl;
+        LOG_ERROR("[HTTP] Listen failed");
         return false;
     }
 
@@ -486,7 +498,7 @@ bool HttpServer::start() {
         }
     });
 
-    std::cout << "[HTTP] Server started on port " << impl_->port << std::endl;
+    LOG_INFO("[HTTP] Server started on port {}", impl_->port);
     return true;
 }
 
@@ -504,7 +516,7 @@ void HttpServer::stop() {
 #endif
         impl_->server_fd = -1;
     }
-    std::cout << "[HTTP] Server stopped" << std::endl;
+    LOG_INFO("[HTTP] Server stopped");
 }
 
 bool HttpServer::is_running() const {
