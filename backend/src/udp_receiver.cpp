@@ -1,4 +1,6 @@
 #include "udp_receiver.h"
+#include "logger.h"
+#include "metrics.h"
 #include <iostream>
 #include <cstring>
 #include <thread>
@@ -62,14 +64,14 @@ UdpReceiver::~UdpReceiver() {
 bool UdpReceiver::start() {
 #ifdef _WIN32
     if (WSAStartup(MAKEWORD(2, 2), &impl_->wsa_data) != 0) {
-        std::cerr << "[UDP] WSAStartup failed" << std::endl;
+        LOG_ERROR("WSAStartup failed");
         return false;
     }
 #endif
 
     impl_->sock_fd = socket(AF_INET, SOCK_DGRAM, 0);
     if (impl_->sock_fd < 0) {
-        std::cerr << "[UDP] Failed to create socket" << std::endl;
+        LOG_ERROR("Failed to create socket");
         return false;
     }
 
@@ -87,7 +89,7 @@ bool UdpReceiver::start() {
     server_addr.sin_port = htons(impl_->port);
 
     if (bind(impl_->sock_fd, (sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
-        std::cerr << "[UDP] Failed to bind to port " << impl_->port << std::endl;
+        LOG_ERROR("Failed to bind to port {}", impl_->port);
 #ifdef _WIN32
         closesocket(impl_->sock_fd);
 #else
@@ -147,35 +149,33 @@ bool UdpReceiver::start() {
 
                     if (!impl_->validate_sensor_data(data)) {
                         impl_->parse_error_count++;
-                        std::cerr << "[UDP] Data validation failed, crossbow_id="
-                                  << data.crossbow_id << std::endl;
+                        LOG_ERROR("Data validation failed, crossbow_id={}", data.crossbow_id);
+                        METRICS_UDP_ERROR();
                         continue;
                     }
 
                     if (!impl_->output_queue->push(data)) {
                         impl_->queue_full_count++;
                         if (impl_->queue_full_count % 100 == 0) {
-                            std::cerr << "[UDP] Queue full, dropped "
-                                      << impl_->queue_full_count << " msgs" << std::endl;
+                            LOG_WARN("Queue full, dropped {} msgs", impl_->queue_full_count);
                         }
                     } else {
                         impl_->received_count++;
+                        METRICS_UDP_RECEIVED();
                         if (impl_->received_count % 100 == 0) {
-                            std::cout << "[UDP] Received " << impl_->received_count
-                                      << " msgs, queue_size=" << impl_->output_queue->size()
-                                      << std::endl;
+                            LOG_INFO("Received {} msgs, queue_size={}", impl_->received_count, impl_->output_queue->size());
                         }
                     }
                 } catch (const std::exception& e) {
                     impl_->parse_error_count++;
-                    std::cerr << "[UDP] Parse error (" << impl_->parse_error_count
-                              << "): " << e.what() << std::endl;
+                    LOG_ERROR("Parse error ({}): {}", impl_->parse_error_count, e.what());
+                    METRICS_UDP_ERROR();
                 }
             }
         }
     });
 
-    std::cout << "[UDP] Receiver started on port " << impl_->port << std::endl;
+    LOG_INFO("Receiver started on port {}", impl_->port);
     return true;
 }
 
@@ -196,9 +196,7 @@ void UdpReceiver::stop() {
 #endif
         impl_->sock_fd = -1;
     }
-    std::cout << "[UDP] Receiver stopped. Total: received=" << impl_->received_count
-              << ", parse_errors=" << impl_->parse_error_count
-              << ", queue_dropped=" << impl_->queue_full_count << std::endl;
+    LOG_INFO("Receiver stopped. Total: received={}, parse_errors={}, queue_dropped={}", impl_->received_count, impl_->parse_error_count, impl_->queue_full_count);
 }
 
 bool UdpReceiver::is_running() const {
