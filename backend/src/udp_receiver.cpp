@@ -21,9 +21,12 @@ using json = nlohmann::json;
 
 struct UdpReceiver::Impl {
     int port;
-    DataCallback callback;
+    std::shared_ptr<SensorQueue> output_queue;
     std::atomic<bool> running;
     std::thread receiver_thread;
+    uint64_t received_count;
+    uint64_t parse_error_count;
+    uint64_t queue_full_count;
 #ifdef _WIN32
     SOCKET sock_fd;
     WSADATA wsa_data;
@@ -31,11 +34,26 @@ struct UdpReceiver::Impl {
     int sock_fd;
 #endif
 
-    Impl(int p, DataCallback cb) : port(p), callback(cb), running(false), sock_fd(-1) {}
+    Impl(int p, std::shared_ptr<SensorQueue> q)
+        : port(p), output_queue(q), running(false),
+          received_count(0), parse_error_count(0), queue_full_count(0),
+          sock_fd(-1) {}
+
+    bool validate_sensor_data(const SensorData& data) {
+        if (data.crossbow_id == 0) return false;
+        if (data.arrow_velocity <= 0 || data.arrow_velocity > 500) return false;
+        if (data.range < 0 || data.range > 5000) return false;
+        if (data.bow_string_tension < 0) return false;
+        if (data.bow_arm_deformation < 0) return false;
+        if (data.aim_angle < -90 || data.aim_angle > 90) return false;
+        if (data.temperature < -50 || data.temperature > 150) return false;
+        if (data.wind_speed < 0 || data.wind_speed > 100) return false;
+        return true;
+    }
 };
 
-UdpReceiver::UdpReceiver(int port, DataCallback callback)
-    : impl_(std::make_unique<Impl>(port, callback)) {}
+UdpReceiver::UdpReceiver(int port, std::shared_ptr<SensorQueue> queue)
+    : impl_(std::make_unique<Impl>(port, queue)) {}
 
 UdpReceiver::~UdpReceiver() {
     stop();
@@ -54,6 +72,13 @@ bool UdpReceiver::start() {
         std::cerr << "[UDP] Failed to create socket" << std::endl;
         return false;
     }
+
+    int buf_size = 1024 * 1024;
+#ifdef _WIN32
+    setsockopt(impl_->sock_fd, SOL_SOCKET, SO_RCVBUF, (const char*)&buf_size, sizeof(buf_size));
+#else
+    setsockopt(impl_->sock_fd, SOL_SOCKET, SO_RCVBUF, &buf_size, sizeof(buf_size));
+#endif
 
     sockaddr_in server_addr;
     std::memset(&server_addr, 0, sizeof(server_addr));
@@ -120,11 +145,31 @@ bool UdpReceiver::start() {
                     data.wind_speed = j.value("wind_speed", 0.0);
                     data.wind_direction = j.value("wind_direction", 0.0);
 
-                    if (impl_->callback) {
-                        impl_->callback(data);
+                    if (!impl_->validate_sensor_data(data)) {
+                        impl_->parse_error_count++;
+                        std::cerr << "[UDP] Data validation failed, crossbow_id="
+                                  << data.crossbow_id << std::endl;
+                        continue;
+                    }
+
+                    if (!impl_->output_queue->push(data)) {
+                        impl_->queue_full_count++;
+                        if (impl_->queue_full_count % 100 == 0) {
+                            std::cerr << "[UDP] Queue full, dropped "
+                                      << impl_->queue_full_count << " msgs" << std::endl;
+                        }
+                    } else {
+                        impl_->received_count++;
+                        if (impl_->received_count % 100 == 0) {
+                            std::cout << "[UDP] Received " << impl_->received_count
+                                      << " msgs, queue_size=" << impl_->output_queue->size()
+                                      << std::endl;
+                        }
                     }
                 } catch (const std::exception& e) {
-                    std::cerr << "[UDP] Parse error: " << e.what() << std::endl;
+                    impl_->parse_error_count++;
+                    std::cerr << "[UDP] Parse error (" << impl_->parse_error_count
+                              << "): " << e.what() << std::endl;
                 }
             }
         }
@@ -136,6 +181,9 @@ bool UdpReceiver::start() {
 
 void UdpReceiver::stop() {
     impl_->running = false;
+    if (impl_->output_queue) {
+        impl_->output_queue->stop();
+    }
     if (impl_->receiver_thread.joinable()) {
         impl_->receiver_thread.join();
     }
@@ -148,7 +196,9 @@ void UdpReceiver::stop() {
 #endif
         impl_->sock_fd = -1;
     }
-    std::cout << "[UDP] Receiver stopped" << std::endl;
+    std::cout << "[UDP] Receiver stopped. Total: received=" << impl_->received_count
+              << ", parse_errors=" << impl_->parse_error_count
+              << ", queue_dropped=" << impl_->queue_full_count << std::endl;
 }
 
 bool UdpReceiver::is_running() const {
