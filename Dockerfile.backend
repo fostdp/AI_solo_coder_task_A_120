@@ -1,0 +1,51 @@
+FROM gcc:13 AS builder
+
+WORKDIR /build
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    cmake \
+    make \
+    libboost-all-dev \
+    libspdlog-dev \
+    nlohmann-json3-dev \
+    prometheus-cpp-dev \
+    libclickhouse-cpp-dev \
+    libpaho-mqttpp-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY backend /build/backend
+COPY third_party /build/third_party
+
+RUN mkdir -p /build/backend/build && cd /build/backend/build && \
+    cmake .. \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DUSE_BOOST_LOCKFREE=ON \
+        -DUSE_SPDLOG=ON \
+        -DUSE_PROMETHEUS=ON \
+        -DUSE_CLICKHOUSE=ON \
+        -DUSE_MQTT=ON && \
+    make -j$(nproc)
+
+# 运行时镜像
+FROM debian:bookworm-slim AS runtime
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libboost-system1.74.0 \
+    libspdlog1.11 \
+    prometheus-cpp \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY --from=builder /build/backend/build/crossbow_backend /app/crossbow_backend
+COPY backend/config.json /app/config.json
+
+RUN chmod +x /app/crossbow_backend
+
+EXPOSE 8080 9000/udp 9090
+
+HEALTHCHECK --interval=30s --timeout=3s \
+  CMD curl -f http://localhost:8080/api/system-status || exit 1
+
+CMD ["./crossbow_backend", "config.json"]
