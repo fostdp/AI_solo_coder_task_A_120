@@ -1,0 +1,20 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY simulator/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY simulator/crossbow_simulator.py /app/crossbow_simulator.py
+
+RUN chmod +x /app/crossbow_simulator.py
+
+ENV SIMULATOR_HOST=backend
+ENV SIMULATOR_PORT=9000
+ENV SIMULATOR_INTERVAL=60
+ENV SIMULATOR_ALL=true
+ENV SIMULATOR_SEED=42
+
+CMD ["python", "-u", "crossbow_simulator.py", "--host", "${SIMULATOR_HOST}", "--port", "${SIMULATOR_PORT}", "--interval", "${SIMULATOR_INTERVAL}"]
+
+ENTRYPOINT ["sh", "-c", "python -u crossbow_simulator.py --host $SIMULATOR_HOST --port $SIMULATOR_PORT --interval $SIMULATOR_INTERVAL ${SIMULATOR_ALL:+} ${SIMULATOR_ID:+--id $SIMULATOR_ID} ${SIMULATOR_SEED:+--seed $SIMULATOR_SEED} ${SIMULATOR_BURST:+--burst $SIMULATOR_BURST} ${SIMULATOR_BURST_INTERVAL:+--burst-interval $SIMULATOR_BURST_INTERVAL}"]
