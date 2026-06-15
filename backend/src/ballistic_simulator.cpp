@@ -1,4 +1,6 @@
 #include "ballistic_simulator.h"
+#include "logger.h"
+#include "metrics.h"
 #include <iostream>
 #include <chrono>
 
@@ -20,8 +22,7 @@ bool BallisticSimulator::start(int num_threads) {
     for (int i = 0; i < num_threads; ++i) {
         workers_.emplace_back(&BallisticSimulator::worker_loop, this);
     }
-    std::cout << "[Ballistic] Simulator started with " << num_threads << " worker threads"
-              << std::endl;
+    LOG_INFO("Simulator started with {} worker threads", num_threads);
     return true;
 }
 
@@ -34,8 +35,7 @@ void BallisticSimulator::stop() {
         if (t.joinable()) t.join();
     }
     workers_.clear();
-    std::cout << "[Ballistic] Simulator stopped. Processed=" << processed_count_
-              << ", errors=" << error_count_ << std::endl;
+    LOG_INFO("Simulator stopped. Processed={}, errors={}", processed_count_, error_count_);
 }
 
 bool BallisticSimulator::is_running() const {
@@ -88,7 +88,7 @@ BallisticResult BallisticSimulator::process_sensor_data(const SensorData& data) 
             DynamicsModel::calculate_drag_coefficient(result.mach_number_at_launch);
     } catch (const std::exception& e) {
         error_count_++;
-        std::cerr << "[Ballistic] Simulation error: " << e.what() << std::endl;
+        LOG_ERROR("Simulation error: {}", e.what());
     }
 
     return result;
@@ -102,6 +102,7 @@ void BallisticSimulator::worker_loop() {
                 continue;
             }
 
+            auto start_time = std::chrono::high_resolution_clock::now();
             BallisticResult result = process_sensor_data(data);
             {
                 std::lock_guard<std::mutex> lock(result_mutex_);
@@ -113,16 +114,19 @@ void BallisticSimulator::worker_loop() {
                 }
             }
             processed_count_++;
+            auto end_time = std::chrono::high_resolution_clock::now();
+            auto duration_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
+            METRICS_BALLISTIC_LATENCY(duration_ms);
+            METRICS_BALLISTIC_DONE();
             if (processed_count_ % 50 == 0) {
-                std::cout << "[Ballistic] Processed " << processed_count_
-                          << " shots, queue=" << input_queue_->size() << std::endl;
+                LOG_INFO("Processed {} shots, queue={}", processed_count_, input_queue_->size());
             }
         } catch (const std::exception& e) {
             error_count_++;
-            std::cerr << "[Ballistic] Worker error: " << e.what() << std::endl;
+            LOG_ERROR("Worker error: {}", e.what());
         } catch (...) {
             error_count_++;
-            std::cerr << "[Ballistic] Unknown worker error" << std::endl;
+            LOG_ERROR("Unknown worker error");
         }
     }
 }
